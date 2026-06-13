@@ -1,0 +1,29 @@
+# Node / Next.js
+node_modules/
+.next/
+out/
+coverage/
+dist/
+
+# Environment
+.env
+.env.local
+.env.development
+.env.production
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+
+# Netlify
+.netlify/

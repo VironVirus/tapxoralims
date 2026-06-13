@@ -1,0 +1,922 @@
+"use client";
+
+import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Loader2, Pencil, Plus, Search, ShieldAlert, TestTube2, ToggleLeft, ToggleRight, Trash2 } from "lucide-react";
+import { useAuth } from "@/components/auth-provider";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle
+} from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Separator } from "@/components/ui/separator";
+import { Textarea } from "@/components/ui/textarea";
+import { isAdminRole } from "@/lib/guards";
+import { commitLocalMutation, generateLocalId, resolveOfflineQuery } from "@/lib/offline-core";
+import { cacheTests, getTestsLocal } from "@/lib/offline-data";
+import { getSupabaseBrowserClient } from "@/lib/supabase";
+import type { Tables } from "@/types/supabase";
+import {
+  resultTypes,
+  testFormSchema,
+  type TestFormValues
+} from "@/features/tests/schema";
+import {
+  formatReferenceRange,
+  isStoredReferenceRange,
+  type StoredReferenceRange
+} from "@/features/tests/reference-range";
+import { useToast } from "@/hooks/use-toast";
+
+type TestRow = Tables<"tests">;
+type FilterStatus = "all" | "active" | "inactive";
+type FilterResultType = "all" | TestRow["result_type"];
+type FormErrors = Partial<Record<string, string>>;
+
+const initialFormState: TestFormValues = {
+  name: "",
+  category: null,
+  price: 0,
+  result_type: "numeric",
+  unit: null,
+  is_active: true,
+  reference_range: {
+    mode: "numeric",
+    min: null,
+    max: null,
+    text: null,
+    options: null,
+    positive_label: null,
+    negative_label: null
+  }
+};
+
+function createNumericRange(
+  min: number | null = null,
+  max: number | null = null
+): StoredReferenceRange {
+  return {
+    mode: "numeric",
+    min,
+    max,
+    text: null,
+    options: null,
+    positive_label: null,
+    negative_label: null
+  };
+}
+
+function createTextRange(text = ""): StoredReferenceRange {
+  return {
+    mode: "text",
+    min: null,
+    max: null,
+    text,
+    options: null,
+    positive_label: null,
+    negative_label: null
+  };
+}
+
+function createSelectRange(
+  options: string[] = ["Positive", "Negative"],
+  text: string | null = null
+): StoredReferenceRange {
+  return {
+    mode: "select",
+    min: null,
+    max: null,
+    text,
+    options,
+    positive_label: null,
+    negative_label: null
+  };
+}
+
+function createBooleanRange(
+  positiveLabel = "Positive",
+  negativeLabel = "Negative",
+  text: string | null = null
+): StoredReferenceRange {
+  return {
+    mode: "boolean",
+    min: null,
+    max: null,
+    text,
+    options: null,
+    positive_label: positiveLabel,
+    negative_label: negativeLabel
+  };
+}
+
+async function fetchTests({
+  query,
+  status,
+  resultType
+}: {
+  query: string;
+  status: FilterStatus;
+  resultType: FilterResultType;
+}) {
+  const supabase = getSupabaseBrowserClient();
+  return resolveOfflineQuery<TestRow[]>({
+    cacheKey: `tests:${query}:${status}:${resultType}`,
+    offline: () => getTestsLocal({ query, resultType, status }),
+    online: async () => {
+      if (!supabase) {
+        return getTestsLocal({ query, resultType, status });
+      }
+
+      let request = supabase
+        .from("tests")
+        .select("*")
+        .order("name", { ascending: true });
+
+      if (query.trim()) {
+        request = request.ilike("name", `%${query.trim()}%`);
+      }
+
+      if (status === "active") {
+        request = request.eq("is_active", true);
+      }
+
+      if (status === "inactive") {
+        request = request.eq("is_active", false);
+      }
+
+      if (resultType !== "all") {
+        request = request.eq("result_type", resultType);
+      }
+
+      const { data, error } = await request;
+      if (error) {
+        throw new Error(error.message);
+      }
+
+      await cacheTests((data ?? []) as TestRow[]);
+      return (data ?? []) as TestRow[];
+    }
+  });
+}
+
+export function TestCatalogueAdmin() {
+  const { role, loading } = useAuth();
+  const { toast } = useToast();
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState<FilterStatus>("all");
+  const [resultType, setResultType] = useState<FilterResultType>("all");
+  const [formState, setFormState] = useState<TestFormValues>(initialFormState);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [errors, setErrors] = useState<FormErrors>({});
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitSuccess, setSubmitSuccess] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const testsQuery = useQuery({
+    queryKey: ["tests", query, status, resultType],
+    queryFn: () => fetchTests({ query, status, resultType }),
+    enabled: isAdminRole(role),
+    staleTime: 60_000,
+    gcTime: 5 * 60_000,
+    refetchOnWindowFocus: false
+  });
+
+  const totals = useMemo(() => {
+    const tests = testsQuery.data ?? [];
+    return {
+      total: tests.length,
+      active: tests.filter((test) => test.is_active).length,
+      inactive: tests.filter((test) => !test.is_active).length
+    };
+  }, [testsQuery.data]);
+
+  useEffect(() => {
+    if (!submitSuccess) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => setSubmitSuccess(null), 2500);
+    return () => window.clearTimeout(timer);
+  }, [submitSuccess]);
+
+  if (loading) {
+    return (
+      <Card className="border-blue-100">
+        <CardContent className="flex items-center gap-3 p-6 text-sm text-slate-600">
+          <Loader2 className="h-4 w-4 animate-spin text-blue-700" />
+          Loading access and role information...
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (!isAdminRole(role)) {
+    return (
+      <Card className="border-red-100 bg-red-50/60">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-red-900">
+            <ShieldAlert className="h-5 w-5" />
+            Admin access required
+          </CardTitle>
+          <CardDescription className="text-red-800">
+            Only administrators can manage the test catalogue.
+          </CardDescription>
+        </CardHeader>
+      </Card>
+    );
+  }
+
+  const setField = <K extends keyof TestFormValues>(
+    field: K,
+    value: TestFormValues[K]
+  ) => {
+    setFormState((current) => ({ ...current, [field]: value }));
+  };
+
+  const setReferenceRange = (
+    updater: (current: TestFormValues["reference_range"]) => TestFormValues["reference_range"]
+  ) => {
+    setFormState((current) => ({
+      ...current,
+      reference_range: updater(current.reference_range)
+    }));
+  };
+
+  const resetForm = () => {
+    setEditingId(null);
+    setFormState(initialFormState);
+    setErrors({});
+    setSubmitError(null);
+  };
+
+  const loadForEdit = (test: TestRow) => {
+    setEditingId(test.id);
+    setErrors({});
+    setSubmitError(null);
+    setSubmitSuccess(null);
+    setFormState({
+      id: test.id,
+      name: test.name,
+      category: test.category ?? null,
+      price: test.price,
+      result_type: test.result_type as TestFormValues["result_type"],
+      unit: test.unit,
+      is_active: test.is_active,
+      reference_range:
+        isStoredReferenceRange(test.reference_range)
+          ? test.reference_range.mode === "numeric"
+            ? createNumericRange(
+                test.reference_range.min,
+                test.reference_range.max
+              )
+            : test.reference_range.mode === "text"
+              ? createTextRange(test.reference_range.text)
+              : test.reference_range.mode === "select"
+                ? createSelectRange(
+                    test.reference_range.options,
+                    test.reference_range.text
+                  )
+                : createBooleanRange(
+                    test.reference_range.positive_label,
+                    test.reference_range.negative_label,
+                    test.reference_range.text
+                  )
+          : initialFormState.reference_range
+    });
+  };
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSubmitError(null);
+    setSubmitSuccess(null);
+    setErrors({});
+
+    const parsed = testFormSchema.safeParse(formState);
+    if (!parsed.success) {
+      const nextErrors: FormErrors = {};
+      parsed.error.issues.forEach((issue) => {
+        const key = issue.path.join(".") || "form";
+        if (!nextErrors[key]) {
+          nextErrors[key] = issue.message;
+        }
+      });
+      setErrors(nextErrors);
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const currentTest = editingId
+      ? tests.find((test) => test.id === editingId) ?? null
+      : null;
+    const payload = {
+      category: parsed.data.category?.trim() ? parsed.data.category.trim() : null,
+      created_at: currentTest?.created_at ?? now,
+      id: currentTest?.id ?? generateLocalId("test"),
+      is_active: parsed.data.is_active,
+      name: parsed.data.name,
+      price: parsed.data.price,
+      result_type: parsed.data.result_type,
+      reference_range: parsed.data.reference_range,
+      unit: parsed.data.unit?.trim() ? parsed.data.unit.trim() : null,
+      updated_at: now
+    } satisfies TestRow;
+
+    try {
+      setSaving(true);
+      await commitLocalMutation({
+        action: editingId ? "update" : "insert",
+        entity: "tests",
+        payload: editingId
+          ? {
+              category: payload.category,
+              is_active: payload.is_active,
+              name: payload.name,
+              price: payload.price,
+              reference_range: payload.reference_range,
+              result_type: payload.result_type,
+              unit: payload.unit,
+              updated_at: payload.updated_at
+            }
+          : payload,
+        recordId: payload.id
+      });
+
+      await testsQuery.refetch();
+      setSubmitSuccess(editingId ? "Test updated successfully." : "Test added successfully.");
+      toast({
+        title: editingId ? "Test updated" : "Test created",
+        description: `${payload.name} was saved successfully.`,
+        variant: "success"
+      });
+      resetForm();
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to save the test catalogue item.";
+      setSubmitError(message);
+      toast({
+        title: "Catalogue update failed",
+        description: message,
+        variant: "error"
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      setDeletingId(id);
+      setSubmitError(null);
+      await commitLocalMutation({
+        action: "delete",
+        entity: "tests",
+        payload: { id },
+        recordId: id
+      });
+
+      if (editingId === id) {
+        resetForm();
+      }
+
+      await testsQuery.refetch();
+      toast({
+        title: "Test removed",
+        description: "The catalogue entry was deleted successfully.",
+        variant: "success"
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to delete the test.";
+      setSubmitError(message);
+      toast({
+        title: "Delete failed",
+        description: message,
+        variant: "error"
+      });
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const handleReferenceModeChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    const mode = event.target.value as TestFormValues["reference_range"]["mode"];
+    if (mode === "text") {
+      setReferenceRange(() => createTextRange(""));
+      return;
+    }
+
+    if (mode === "select") {
+      setReferenceRange(() => createSelectRange());
+      return;
+    }
+
+    if (mode === "boolean") {
+      setReferenceRange(() => createBooleanRange());
+      return;
+    }
+
+    setReferenceRange(() => createNumericRange());
+  };
+
+  const tests = testsQuery.data ?? [];
+
+  return (
+    <div className="space-y-6">
+      <section className="grid gap-4 md:grid-cols-3">
+        <Card className="border-blue-100">
+          <CardHeader className="pb-2">
+            <CardDescription>Total tests</CardDescription>
+            <CardTitle className="text-3xl text-slate-950">{totals.total}</CardTitle>
+          </CardHeader>
+        </Card>
+        <Card className="border-blue-100">
+          <CardHeader className="pb-2">
+            <CardDescription>Active tests</CardDescription>
+            <CardTitle className="text-3xl text-slate-950">{totals.active}</CardTitle>
+          </CardHeader>
+        </Card>
+        <Card className="border-blue-100">
+          <CardHeader className="pb-2">
+            <CardDescription>Inactive tests</CardDescription>
+            <CardTitle className="text-3xl text-slate-950">{totals.inactive}</CardTitle>
+          </CardHeader>
+        </Card>
+      </section>
+
+      <section className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
+        <Card className="border-blue-100">
+          <CardHeader>
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <CardTitle className="flex items-center gap-2">
+                  <TestTube2 className="h-5 w-5 text-blue-700" />
+                  Test catalogue
+                </CardTitle>
+                <CardDescription>
+                  Search, filter, and maintain active laboratory tests.
+                </CardDescription>
+              </div>
+              <Badge variant="outline">Admin only</Badge>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-3 md:grid-cols-[1fr_auto_auto]">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-slate-400" />
+                <Input
+                  className="pl-9"
+                  placeholder="Search test name"
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                />
+              </div>
+
+              <select
+                className="h-10 rounded-lg border border-border bg-background px-3 text-sm"
+                value={status}
+                onChange={(event) => setStatus(event.target.value as FilterStatus)}
+              >
+                <option value="all">All statuses</option>
+                <option value="active">Active</option>
+                <option value="inactive">Inactive</option>
+              </select>
+
+              <select
+                className="h-10 rounded-lg border border-border bg-background px-3 text-sm"
+                value={resultType}
+                onChange={(event) =>
+                  setResultType(event.target.value as FilterResultType)
+                }
+              >
+                <option value="all">All result types</option>
+                {resultTypes.map((type) => (
+                  <option key={type} value={type}>
+                    {type}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <Separator />
+
+            {testsQuery.isLoading ? (
+              <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-600">
+                <Loader2 className="h-4 w-4 animate-spin text-blue-700" />
+                Loading tests...
+              </div>
+            ) : null}
+
+            {testsQuery.isError ? (
+              <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-700">
+                {testsQuery.error instanceof Error
+                  ? testsQuery.error.message
+                  : "Could not load the test catalogue."}
+              </div>
+            ) : null}
+
+            {!testsQuery.isLoading && !testsQuery.isError ? (
+              <div className="overflow-hidden rounded-xl border border-slate-200">
+                <table className="min-w-full divide-y divide-slate-200 text-sm">
+                  <thead className="bg-slate-50">
+                    <tr className="text-left text-slate-500">
+                      <th className="px-4 py-3 font-medium">Name</th>
+                      <th className="px-4 py-3 font-medium">Type</th>
+                      <th className="px-4 py-3 font-medium">Reference range</th>
+                      <th className="px-4 py-3 font-medium">Price</th>
+                      <th className="px-4 py-3 font-medium">Status</th>
+                      <th className="px-4 py-3 font-medium">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200 bg-white">
+                    {tests.length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan={6}
+                          className="px-4 py-8 text-center text-slate-500"
+                        >
+                          No tests matched the current search or filters.
+                        </td>
+                      </tr>
+                    ) : null}
+
+                    {tests.map((test) => (
+                      <tr key={test.id}>
+                        <td className="px-4 py-3">
+                          <div className="font-medium text-slate-900">{test.name}</div>
+                          <div className="text-xs text-slate-500">
+                            {(test.category || "Uncategorized") + " • " + (test.unit || "No unit")}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 capitalize text-slate-700">
+                          {test.result_type}
+                        </td>
+                        <td className="px-4 py-3 text-slate-700">
+                          {formatReferenceRange(test.reference_range)}
+                        </td>
+                        <td className="px-4 py-3 text-slate-700">
+                          NGN {test.price.toLocaleString()}
+                        </td>
+                        <td className="px-4 py-3">
+                          <Badge variant={test.is_active ? "default" : "secondary"}>
+                            {test.is_active ? "Active" : "Inactive"}
+                          </Badge>
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex gap-2">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => loadForEdit(test)}
+                            >
+                              <Pencil className="h-4 w-4" />
+                              Edit
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              disabled={deletingId === test.id}
+                              onClick={() => handleDelete(test.id)}
+                            >
+                              {deletingId === test.id ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <Trash2 className="h-4 w-4" />
+                              )}
+                              Delete
+                            </Button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+
+        <Card className="border-blue-100">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Plus className="h-5 w-5 text-blue-700" />
+              {editingId ? "Edit test" : "Add test"}
+            </CardTitle>
+            <CardDescription>
+              Define pricing, result type, unit, and reference range rules.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form className="space-y-4" onSubmit={handleSubmit}>
+              <div className="space-y-2">
+                <Label htmlFor="test-name">Test name</Label>
+                <Input
+                  id="test-name"
+                  value={formState.name}
+                  onChange={(event) => setField("name", event.target.value)}
+                  placeholder="Full blood count"
+                />
+                {errors.name ? (
+                  <p className="text-sm text-red-700">{errors.name}</p>
+                ) : null}
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="test-price">Price (NGN)</Label>
+                  <Input
+                    id="test-price"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={formState.price}
+                    onChange={(event) => setField("price", Number(event.target.value))}
+                  />
+                  {errors.price ? (
+                    <p className="text-sm text-red-700">{errors.price}</p>
+                  ) : null}
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="test-category">Category</Label>
+                  <Input
+                    id="test-category"
+                    value={formState.category ?? ""}
+                    onChange={(event) => setField("category", event.target.value || null)}
+                    placeholder="Chemistry, Hematology, Serology"
+                  />
+                  {errors.category ? (
+                    <p className="text-sm text-red-700">{errors.category}</p>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="result-type">Result type</Label>
+                  <select
+                    id="result-type"
+                    className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm"
+                    value={formState.result_type}
+                    onChange={(event) => {
+                      const nextType =
+                        event.target.value as TestFormValues["result_type"];
+                      setField("result_type", nextType);
+
+                      if (nextType === "numeric") {
+                        setReferenceRange(() => createNumericRange());
+                        return;
+                      }
+
+                      if (nextType === "boolean") {
+                        setReferenceRange(() => createBooleanRange());
+                        return;
+                      }
+
+                      if (
+                        formState.reference_range.mode !== "text" &&
+                        formState.reference_range.mode !== "select"
+                      ) {
+                        setReferenceRange(() => createTextRange(""));
+                      }
+                    }}
+                  >
+                    {resultTypes.map((type) => (
+                      <option key={type} value={type}>
+                        {type}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="test-unit">Unit</Label>
+                <Input
+                  id="test-unit"
+                  value={formState.unit ?? ""}
+                  onChange={(event) =>
+                    setField("unit", event.target.value || null)
+                  }
+                  placeholder="g/dL"
+                />
+                {errors.unit ? (
+                  <p className="text-sm text-red-700">{errors.unit}</p>
+                ) : null}
+              </div>
+
+              <div className="space-y-3 rounded-xl border border-slate-200 p-4">
+                <div className="space-y-2">
+                  <Label htmlFor="reference-mode">Reference range format</Label>
+                  <select
+                    id="reference-mode"
+                    className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm"
+                    value={formState.reference_range.mode}
+                    onChange={handleReferenceModeChange}
+                  >
+                    {formState.result_type === "numeric" ? (
+                      <option value="numeric">Minimum / maximum values</option>
+                    ) : null}
+                    {formState.result_type === "text" ? (
+                      <>
+                        <option value="text">Text description</option>
+                        <option value="select">Dropdown options</option>
+                      </>
+                    ) : null}
+                    {formState.result_type === "boolean" ? (
+                      <option value="boolean">Positive / negative labels</option>
+                    ) : null}
+                  </select>
+                </div>
+
+                {formState.reference_range.mode === "numeric" ? (
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="reference-min">Minimum value</Label>
+                      <Input
+                        id="reference-min"
+                        type="number"
+                        step="0.01"
+                        value={formState.reference_range.min ?? ""}
+                        onChange={(event) =>
+                          setReferenceRange((current) =>
+                            current.mode === "numeric"
+                              ? createNumericRange(
+                                  event.target.value === ""
+                                    ? null
+                                    : Number(event.target.value),
+                                  current.max
+                                )
+                              : current
+                          )
+                        }
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="reference-max">Maximum value</Label>
+                      <Input
+                        id="reference-max"
+                        type="number"
+                        step="0.01"
+                        value={formState.reference_range.max ?? ""}
+                        onChange={(event) =>
+                          setReferenceRange((current) =>
+                            current.mode === "numeric"
+                              ? createNumericRange(
+                                  current.min,
+                                  event.target.value === ""
+                                    ? null
+                                    : Number(event.target.value)
+                                )
+                              : current
+                          )
+                        }
+                      />
+                    </div>
+                  </div>
+                ) : formState.reference_range.mode === "text" ? (
+                  <div className="space-y-2">
+                    <Label htmlFor="reference-text">Reference range text</Label>
+                    <Textarea
+                      id="reference-text"
+                      value={formState.reference_range.text ?? ""}
+                      onChange={(event) =>
+                        setReferenceRange((current) =>
+                          current.mode === "text"
+                            ? createTextRange(event.target.value)
+                            : current
+                        )
+                      }
+                      placeholder="Adults: 4.5 - 11.0 x10^9/L"
+                    />
+                  </div>
+                ) : formState.reference_range.mode === "select" ? (
+                  <div className="space-y-2">
+                    <Label htmlFor="reference-options">Dropdown options</Label>
+                    <Textarea
+                      id="reference-options"
+                      value={formState.reference_range.options.join("\n")}
+                      onChange={(event) =>
+                        setReferenceRange((current) =>
+                          current.mode === "select"
+                            ? createSelectRange(
+                                event.target.value
+                                  .split("\n")
+                                  .map((value) => value.trim())
+                                  .filter(Boolean),
+                                current.text
+                              )
+                            : current
+                        )
+                      }
+                      placeholder={"Positive\nNegative"}
+                    />
+                    <p className="text-xs text-slate-500">
+                      Enter one option per line for dropdown-style result entry.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="positive-label">Positive label</Label>
+                      <Input
+                        id="positive-label"
+                        value={formState.reference_range.positive_label ?? ""}
+                        onChange={(event) =>
+                          setReferenceRange((current) =>
+                            current.mode === "boolean"
+                              ? createBooleanRange(
+                                  event.target.value,
+                                  current.negative_label,
+                                  current.text
+                                )
+                              : current
+                          )
+                        }
+                        placeholder="Positive"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="negative-label">Negative label</Label>
+                      <Input
+                        id="negative-label"
+                        value={formState.reference_range.negative_label ?? ""}
+                        onChange={(event) =>
+                          setReferenceRange((current) =>
+                            current.mode === "boolean"
+                              ? createBooleanRange(
+                                  current.positive_label,
+                                  event.target.value,
+                                  current.text
+                                )
+                              : current
+                          )
+                        }
+                        placeholder="Negative"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {errors["reference_range"] ? (
+                  <p className="text-sm text-red-700">{errors["reference_range"]}</p>
+                ) : null}
+              </div>
+
+              <div className="flex items-center justify-between rounded-xl border border-slate-200 px-4 py-3">
+                <div>
+                  <p className="text-sm font-medium text-slate-900">Availability</p>
+                  <p className="text-xs text-slate-500">
+                    Only active tests should appear in daily operations.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="flex items-center gap-2 text-sm font-medium text-slate-700"
+                  onClick={() => setField("is_active", !formState.is_active)}
+                >
+                  {formState.is_active ? (
+                    <ToggleRight className="h-7 w-7 text-blue-700" />
+                  ) : (
+                    <ToggleLeft className="h-7 w-7 text-slate-400" />
+                  )}
+                  {formState.is_active ? "Active" : "Inactive"}
+                </button>
+              </div>
+
+              {submitError ? (
+                <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {submitError}
+                </p>
+              ) : null}
+
+              {submitSuccess ? (
+                <p className="rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">
+                  {submitSuccess}
+                </p>
+              ) : null}
+
+              <div className="flex gap-3">
+                <Button type="submit" disabled={saving}>
+                  {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                  {editingId ? "Save changes" : "Create test"}
+                </Button>
+                <Button type="button" variant="outline" onClick={resetForm}>
+                  Clear
+                </Button>
+              </div>
+            </form>
+          </CardContent>
+        </Card>
+      </section>
+    </div>
+  );
+}
