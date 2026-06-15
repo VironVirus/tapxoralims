@@ -3,6 +3,7 @@ import { Activity, TestTube2, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { OfflineSyncPanel } from "@/features/admin/offline-sync-panel";
+import { UserManagementPanel } from "@/features/admin/user-management";
 
 export default function AdminPage() {
   return (
@@ -64,10 +65,12 @@ export default function AdminPage() {
             </CardDescription>
           </CardHeader>
           <CardContent className="text-sm text-slate-600">
-            This card is reserved for the upcoming user-management module.
+            Review staff accounts below, then assign their facility and role after registration.
           </CardContent>
         </Card>
       </div>
+
+      <UserManagementPanel />
     </div>
   );
 }

@@ -81,6 +81,7 @@ $$;
 create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   display_name text,
+  email text,
   avatar_url text,
   role public.app_role not null default 'Receptionist',
   facility_id uuid references public.facilities(id) on delete set null default public.default_facility_id(),
@@ -92,7 +93,16 @@ alter table public.profiles
   add column if not exists facility_id uuid references public.facilities(id) on delete set null;
 
 alter table public.profiles
+  add column if not exists email text;
+
+alter table public.profiles
   alter column facility_id set default public.default_facility_id();
+
+update public.profiles profile
+set email = auth_user.email
+from auth.users auth_user
+where profile.id = auth_user.id
+  and profile.email is null;
 
 create table if not exists public.patients (
   id uuid primary key default gen_random_uuid(),
@@ -933,7 +943,7 @@ security definer
 set search_path = public
 as $$
 begin
-  insert into public.profiles (id, display_name, avatar_url, facility_id)
+  insert into public.profiles (id, display_name, email, avatar_url, facility_id)
   values (
     new.id,
     coalesce(
@@ -941,6 +951,7 @@ begin
       new.raw_user_meta_data ->> 'name',
       new.email
     ),
+    new.email,
     new.raw_user_meta_data ->> 'avatar_url',
     public.default_facility_id()
   )
@@ -956,9 +967,12 @@ language plpgsql
 as $$
 begin
   if auth.uid() is not null
-    and new.role is distinct from old.role
+    and (
+      new.role is distinct from old.role
+      or new.facility_id is distinct from old.facility_id
+    )
     and not public.current_user_is_admin() then
-    raise exception 'Only administrators can change user roles';
+    raise exception 'Only administrators can change user roles or facility assignments';
   end if;
 
   return new;
@@ -1914,6 +1928,9 @@ for each row execute procedure public.set_updated_at();
 
 create index if not exists profiles_facility_id_idx
   on public.profiles (facility_id);
+
+create index if not exists profiles_email_idx
+  on public.profiles (email);
 
 create index if not exists patients_facility_id_idx
   on public.patients (facility_id);

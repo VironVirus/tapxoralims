@@ -28,7 +28,7 @@ const initialState: RegisterFormValues = {
 
 export default function RegisterPage() {
   const router = useRouter();
-  const { session, loading: authLoading } = useAuth();
+  const { refreshProfile, session, loading: authLoading } = useAuth();
   const [form, setForm] = useState<RegisterFormValues>(initialState);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -68,19 +68,21 @@ export default function RegisterPage() {
         emailRedirectTo: `${window.location.origin}/auth/callback?next=/dashboard`
       }
     });
-    setLoading(false);
-
     if (signUpError) {
+      setLoading(false);
       setError(signUpError.message);
       return;
     }
 
     if (data.session) {
-      router.push("/dashboard");
+      await refreshProfile(data.session.user.id);
+      setLoading(false);
+      router.replace("/dashboard");
       router.refresh();
       return;
     }
 
+    setLoading(false);
     setSuccess("Account created. Check your email to confirm your account.");
   };
 

@@ -4,6 +4,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useCallback,
   useState,
   type ReactNode
 } from "react";
@@ -21,7 +22,7 @@ type AuthContextValue = {
   role: AppRole | null;
   facilityId: string | null;
   loading: boolean;
-  refreshProfile: () => Promise<void>;
+  refreshProfile: (userId?: string) => Promise<void>;
   signOut: () => Promise<void>;
 };
 
@@ -39,11 +40,35 @@ async function loadProfile(userId: string) {
 
       const { data, error } = await supabase
         .from("profiles")
-        .select("id, display_name, avatar_url, facility_id, role, created_at, updated_at")
+        .select("id, display_name, email, avatar_url, facility_id, role, created_at, updated_at")
         .eq("id", userId)
         .maybeSingle();
 
-      if (error || !data) {
+      if (error) {
+        const missingEmailColumn =
+          error.message.toLowerCase().includes("email") &&
+          error.message.toLowerCase().includes("profiles");
+
+        if (!missingEmailColumn) {
+          return null;
+        }
+
+        const { data: fallbackData, error: fallbackError } = await supabase
+          .from("profiles")
+          .select("id, display_name, avatar_url, facility_id, role, created_at, updated_at")
+          .eq("id", userId)
+          .maybeSingle();
+
+        if (fallbackError || !fallbackData) {
+          return null;
+        }
+
+        const profileWithEmail = { ...fallbackData, email: null } as UserProfile;
+        await cacheProfiles([profileWithEmail]);
+        return profileWithEmail;
+      }
+
+      if (!data) {
         return null;
       }
 
@@ -106,26 +131,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [supabase]);
 
-  const refreshProfile = async () => {
-    if (!session?.user) {
+  const refreshProfile = useCallback(async (userId?: string) => {
+    const profileUserId = userId ?? session?.user.id ?? null;
+    if (!profileUserId) {
       setProfile(null);
       return;
     }
 
-    setProfile(await loadProfile(session.user.id));
-  };
+    setProfile(await loadProfile(profileUserId));
+  }, [session?.user]);
 
-  const signOut = async () => {
+  const signOut = useCallback(async () => {
     if (!supabase) {
       setSession(null);
       setProfile(null);
       return;
     }
 
-    await supabase.auth.signOut();
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      throw error;
+    }
+
     setSession(null);
     setProfile(null);
-  };
+  }, [supabase]);
 
   const value: AuthContextValue = {
     session,

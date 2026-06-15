@@ -315,6 +315,12 @@ export function AppShell({ children }: { children: ReactNode }) {
               <Button variant="outline" size="icon">
                 <Bell className="h-4 w-4" />
               </Button>
+              <Button asChild variant="outline" className="hidden sm:inline-flex">
+                <Link href="/logout">
+                  <LogOut className="h-4 w-4" />
+                  Logout
+                </Link>
+              </Button>
             </div>
           </div>
         </header>

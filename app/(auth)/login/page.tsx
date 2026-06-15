@@ -19,7 +19,7 @@ const initialState: LoginFormValues = {
 
 export default function LoginPage() {
   const router = useRouter();
-  const { session, loading: authLoading } = useAuth();
+  const { refreshProfile, session, loading: authLoading } = useAuth();
   const [form, setForm] = useState<LoginFormValues>(initialState);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -49,15 +49,17 @@ export default function LoginPage() {
     }
 
     setLoading(true);
-    const { error: authError } = await supabase.auth.signInWithPassword(parsed.data);
-    setLoading(false);
+    const { data, error: authError } = await supabase.auth.signInWithPassword(parsed.data);
 
     if (authError) {
+      setLoading(false);
       setError(authError.message);
       return;
     }
 
-    router.push("/dashboard");
+    await refreshProfile(data.user?.id);
+    setLoading(false);
+    router.replace("/dashboard");
     router.refresh();
   };
 

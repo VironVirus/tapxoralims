@@ -20,7 +20,11 @@ export default function LogoutPage() {
     hasSignedOut.current = true;
 
     const run = async () => {
-      await signOut();
+      try {
+        await signOut();
+      } finally {
+        router.refresh();
+      }
       router.replace("/login");
     };
 

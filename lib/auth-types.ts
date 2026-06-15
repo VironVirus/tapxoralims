@@ -13,6 +13,7 @@ export const appRoles: AppRole[] = [
 export type UserProfile = {
   id: string;
   display_name: string | null;
+  email: string | null;
   avatar_url: string | null;
   facility_id: string | null;
   role: AppRole;
