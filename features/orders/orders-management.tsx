@@ -8,7 +8,8 @@ import {
   useMemo,
   useRef,
   useState,
-  type FormEvent
+  type FormEvent,
+  type ReactNode
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -21,9 +22,11 @@ import {
   PanelRightClose,
   PanelRightOpen,
   PencilLine,
+  Save,
   Sparkles,
   Search,
-  ShieldAlert
+  ShieldAlert,
+  Trash2
 } from "lucide-react";
 import { useAuth } from "@/components/auth-provider";
 import { Badge } from "@/components/ui/badge";
@@ -118,6 +121,17 @@ type QuickBundleMatch = {
   missingCount: number;
 };
 
+type TestBundleRow = {
+  created_at: string;
+  description: string | null;
+  facility_id: string;
+  id: string;
+  is_active: boolean;
+  name: string;
+  test_ids: string[];
+  updated_at: string;
+};
+
 const quickBundleDefinitions: QuickBundleDefinition[] = [
   {
     id: "fbc",
@@ -147,6 +161,28 @@ const invoicePrintSelect =
 
 function normalizeLookupValue(value: string | null | undefined) {
   return (value ?? "").trim().toLowerCase();
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function renderHighlightedText(value: string, query: string): ReactNode {
+  const needle = query.trim();
+  if (!needle) {
+    return value;
+  }
+
+  const matcher = new RegExp(`(${escapeRegExp(needle)})`, "ig");
+  return value.split(matcher).map((part, index) =>
+    part.toLowerCase() === needle.toLowerCase() ? (
+      <mark key={`${part}-${index}`} className="rounded bg-amber-200 px-0.5 text-slate-950">
+        {part}
+      </mark>
+    ) : (
+      <span key={`${part}-${index}`}>{part}</span>
+    )
+  );
 }
 
 function formatPatientOption(patient: PatientSearchRow) {
@@ -300,6 +336,42 @@ async function fetchRecentOrders() {
   });
 }
 
+async function fetchFacilityBundles(facilityId: string) {
+  const supabase = getSupabaseBrowserClient() as unknown as {
+    from: (table: "test_bundles") => {
+      select: (columns: string) => {
+        eq: (
+          column: "facility_id",
+          value: string
+        ) => {
+          eq: (
+            column: "is_active",
+            value: boolean
+          ) => {
+            order: (
+              column: "name",
+              options: { ascending: boolean }
+            ) => Promise<{ data: TestBundleRow[] | null; error: Error | null }>;
+          };
+        };
+      };
+    };
+  };
+
+  const { data, error } = await supabase
+    .from("test_bundles")
+    .select("*")
+    .eq("facility_id", facilityId)
+    .eq("is_active", true)
+    .order("name", { ascending: true });
+
+  if (error) {
+    throw error;
+  }
+
+  return data ?? [];
+}
+
 async function fetchOrderForEdit(orderId: string) {
   const supabase = getSupabaseBrowserClient();
   return resolveOnlineQuery<RecentOrderRow | null>({
@@ -341,6 +413,7 @@ export function OrdersManagement() {
     useState<RecentOrderFilter>("all");
   const [recentPriorityFilter, setRecentPriorityFilter] =
     useState<(typeof priorityOptions)[number] | "all">("all");
+  const [receptionistMode, setReceptionistMode] = useState(false);
   const [showRecentPanel, setShowRecentPanel] = useState(true);
   const [selectedCategory, setSelectedCategory] = useState<TestCategoryOption | "">("");
   const [selectedCatalogueTestId, setSelectedCatalogueTestId] = useState("");
@@ -355,6 +428,10 @@ export function OrdersManagement() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitSuccess, setSubmitSuccess] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [bundleName, setBundleName] = useState("");
+  const [bundleDescription, setBundleDescription] = useState("");
+  const [savingBundle, setSavingBundle] = useState(false);
+  const [deletingBundleId, setDeletingBundleId] = useState<string | null>(null);
   const [createdOrder, setCreatedOrder] = useState<{
     orderId: string;
     orderNumber: string;
@@ -397,6 +474,12 @@ export function OrdersManagement() {
   const recentOrdersQuery = useQuery({
     queryKey: ["recent-orders"],
     queryFn: fetchRecentOrders,
+    enabled: canAccessOrders && Boolean(facilityId)
+  });
+
+  const bundlesQuery = useQuery({
+    queryKey: ["facility-test-bundles", facilityId],
+    queryFn: () => fetchFacilityBundles(facilityId as string),
     enabled: canAccessOrders && Boolean(facilityId)
   });
 
@@ -581,6 +664,17 @@ export function OrdersManagement() {
     [testsQuery.data]
   );
 
+  const resolvedBundles = useMemo(
+    () =>
+      (bundlesQuery.data ?? []).map((bundle) => ({
+        ...bundle,
+        tests: bundle.test_ids
+          .map((testId) => testsById.get(testId) ?? null)
+          .filter((test): test is TestRow => Boolean(test))
+      })),
+    [bundlesQuery.data, testsById]
+  );
+
   const highlightedPatient =
     (patientsQuery.data ?? [])[highlightedPatientIndex] ?? null;
   const highlightedCatalogueTest =
@@ -619,6 +713,12 @@ export function OrdersManagement() {
   useEffect(() => {
     setHighlightedTestIndex(0);
   }, [filteredTestsInSelectedCategory]);
+
+  useEffect(() => {
+    if (receptionistMode) {
+      setShowRecentPanel(false);
+    }
+  }, [receptionistMode]);
 
   useEffect(() => {
     if (!createdOrder) {
@@ -739,19 +839,19 @@ export function OrdersManagement() {
     setTestPickerOpen(false);
   };
 
-  const handleAddSelectedTest = () => {
-    if (!selectedCatalogueTestId) {
+  const handleAddSelectedTest = (targetTestId = selectedCatalogueTestId) => {
+    if (!targetTestId) {
       return;
     }
 
     setFormState((current) => {
-      if (current.selected_test_ids.includes(selectedCatalogueTestId)) {
+      if (current.selected_test_ids.includes(targetTestId)) {
         return current;
       }
 
       return {
         ...current,
-        selected_test_ids: [...current.selected_test_ids, selectedCatalogueTestId]
+        selected_test_ids: [...current.selected_test_ids, targetTestId]
       };
     });
     setErrors((current) => ({ ...current, selected_test_ids: undefined }));
@@ -779,6 +879,138 @@ export function OrdersManagement() {
       description: `${bundle.matchedTests.length} test${bundle.matchedTests.length > 1 ? "s" : ""} added to this request.`,
       variant: "success"
     });
+  };
+
+  const handleApplySavedBundle = (bundle: {
+    id: string;
+    name: string;
+    tests: TestRow[];
+  }) => {
+    if (bundle.tests.length === 0) {
+      toast({
+        title: "Bundle has no active tests",
+        description: `${bundle.name} needs to be updated because its tests are missing from the active catalogue.`,
+        variant: "error"
+      });
+      return;
+    }
+
+    setFormState((current) => ({
+      ...current,
+      selected_test_ids: Array.from(
+        new Set([...current.selected_test_ids, ...bundle.tests.map((test) => test.id)])
+      )
+    }));
+    setErrors((current) => ({ ...current, selected_test_ids: undefined }));
+    toast({
+      title: `${bundle.name} added`,
+      description: `${bundle.tests.length} saved test${bundle.tests.length > 1 ? "s" : ""} added.`,
+      variant: "success"
+    });
+  };
+
+  const handleSaveCurrentBundle = async () => {
+    if (!facilityId) {
+      return;
+    }
+
+    const trimmedName = bundleName.trim();
+    if (!trimmedName) {
+      toast({
+        title: "Bundle name required",
+        description: "Enter a bundle name before saving.",
+        variant: "error"
+      });
+      return;
+    }
+
+    if (selectedTests.length === 0) {
+      toast({
+        title: "Select tests first",
+        description: "Choose at least one test before saving a facility bundle.",
+        variant: "error"
+      });
+      return;
+    }
+
+    setSavingBundle(true);
+
+    try {
+      const supabase = getSupabaseBrowserClient() as unknown as {
+        from: (table: "test_bundles") => {
+          insert: (
+            payload: Record<string, unknown>
+          ) => Promise<{ error: Error | null }>;
+        };
+      };
+
+      const { error } = await supabase.from("test_bundles").insert({
+        created_by: user?.id ?? null,
+        description: bundleDescription.trim() || null,
+        facility_id: facilityId,
+        name: trimmedName,
+        test_ids: selectedTests.map((test) => test.id)
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      setBundleName("");
+      setBundleDescription("");
+      await queryClient.invalidateQueries({ queryKey: ["facility-test-bundles"] });
+      toast({
+        title: "Facility bundle saved",
+        description: `${trimmedName} is now available for this facility.`,
+        variant: "success"
+      });
+    } catch (error) {
+      toast({
+        title: "Bundle could not be saved",
+        description: error instanceof Error ? error.message : "Please try again.",
+        variant: "error"
+      });
+    } finally {
+      setSavingBundle(false);
+    }
+  };
+
+  const handleDeleteBundle = async (bundleId: string, bundleNameValue: string) => {
+    setDeletingBundleId(bundleId);
+
+    try {
+      const supabase = getSupabaseBrowserClient() as unknown as {
+        from: (table: "test_bundles") => {
+          delete: () => {
+            eq: (
+              column: "id",
+              value: string
+            ) => Promise<{ error: Error | null }>;
+          };
+        };
+      };
+
+      const { error } = await supabase.from("test_bundles").delete().eq("id", bundleId);
+
+      if (error) {
+        throw error;
+      }
+
+      await queryClient.invalidateQueries({ queryKey: ["facility-test-bundles"] });
+      toast({
+        title: "Bundle removed",
+        description: `${bundleNameValue} was removed from this facility.`,
+        variant: "success"
+      });
+    } catch (error) {
+      toast({
+        title: "Bundle could not be removed",
+        description: error instanceof Error ? error.message : "Please try again.",
+        variant: "error"
+      });
+    } finally {
+      setDeletingBundleId(null);
+    }
   };
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -971,17 +1203,28 @@ export function OrdersManagement() {
                     ? "Add extra tests to the same order number, keep the sample trail intact, and refresh the bill automatically."
                     : "Move from patient search to bundled tests, labels, and billing without the screen feeling crowded."}
                 </CardDescription>
-                <div className="mt-4 flex flex-wrap gap-2 text-xs">
-                  <Badge variant="outline">/ patient</Badge>
-                  <Badge variant="outline">Alt+T test</Badge>
-                  <Badge variant="outline">Ctrl+Enter create</Badge>
-                  <Badge variant="outline">Alt+R recent</Badge>
-                </div>
+                {!receptionistMode ? (
+                  <div className="mt-4 flex flex-wrap gap-2 text-xs">
+                    <Badge variant="outline">/ patient</Badge>
+                    <Badge variant="outline">Alt+T test</Badge>
+                    <Badge variant="outline">Ctrl+Enter create</Badge>
+                    <Badge variant="outline">Alt+R recent</Badge>
+                  </div>
+                ) : null}
               </div>
               <div className="flex items-center gap-2">
                 <Badge variant="outline">
                   {canCreateOrders ? "Reception/Admin" : "View only"}
                 </Badge>
+                <Button
+                  type="button"
+                  variant={receptionistMode ? "default" : "outline"}
+                  className="hidden lg:inline-flex"
+                  onClick={() => setReceptionistMode((current) => !current)}
+                >
+                  <Keyboard className="h-4 w-4" />
+                  {receptionistMode ? "Receptionist mode on" : "Receptionist mode"}
+                </Button>
                 <Button
                   type="button"
                   variant="outline"
@@ -1036,7 +1279,7 @@ export function OrdersManagement() {
                         <Input
                           ref={patientInputRef}
                           id="patient-search-input"
-                          className="pl-9"
+                          className={cn("pl-9", receptionistMode && "h-12 text-base")}
                           value={patientSearch}
                           onFocus={() => setPatientPickerOpen(true)}
                           onBlur={() => {
@@ -1103,10 +1346,17 @@ export function OrdersManagement() {
                                   onClick={() => selectPatient(patient)}
                                 >
                                   <div>
-                                    <p className="font-medium">{patient.name}</p>
+                                    <p className="font-medium">
+                                      {renderHighlightedText(patient.name, patientSearch)}
+                                    </p>
                                     <p className="text-xs text-slate-500">
-                                      {patient.lab_id}
-                                      {patient.phone ? ` / ${patient.phone}` : ""}
+                                      {renderHighlightedText(patient.lab_id, patientSearch)}
+                                      {patient.phone ? (
+                                        <>
+                                          {" / "}
+                                          {renderHighlightedText(patient.phone, patientSearch)}
+                                        </>
+                                      ) : null}
                                     </p>
                                   </div>
                                   <ArrowRight className="mt-0.5 h-4 w-4 text-slate-400" />
@@ -1131,7 +1381,10 @@ export function OrdersManagement() {
                       <Label htmlFor="priority">Priority</Label>
                       <select
                         id="priority"
-                        className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm"
+                        className={cn(
+                          "h-10 w-full rounded-lg border border-border bg-background px-3 text-sm",
+                          receptionistMode && "h-12 text-base"
+                        )}
                         value={formState.priority}
                         onChange={(event) =>
                           setFormState((current) => ({
@@ -1178,13 +1431,77 @@ export function OrdersManagement() {
                       ))}
                     </div>
                   </div>
+                  <div className="grid gap-3 rounded-2xl border border-dashed border-blue-200 bg-white/80 p-4 lg:grid-cols-[minmax(0,1fr)_auto]">
+                    <div className="grid gap-3 md:grid-cols-[220px_minmax(0,1fr)]">
+                      <Input
+                        value={bundleName}
+                        onChange={(event) => setBundleName(event.target.value)}
+                        placeholder="Save current selection as a facility bundle"
+                        className={cn(receptionistMode && "h-12 text-base")}
+                      />
+                      <Input
+                        value={bundleDescription}
+                        onChange={(event) => setBundleDescription(event.target.value)}
+                        placeholder="Optional note, e.g. walk-in malaria package"
+                        className={cn(receptionistMode && "h-12 text-base", receptionistMode && "hidden")}
+                      />
+                    </div>
+                    <Button
+                      type="button"
+                      onClick={handleSaveCurrentBundle}
+                      disabled={savingBundle}
+                      className={cn(receptionistMode && "h-12 px-5 text-base")}
+                    >
+                      {savingBundle ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                      Save bundle
+                    </Button>
+                    <div className="lg:col-span-2">
+                      <div className="flex flex-wrap gap-2">
+                        {resolvedBundles.map((bundle) => (
+                          <div
+                            key={bundle.id}
+                            className="flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2 py-1"
+                          >
+                            <button
+                              type="button"
+                              className="rounded-full px-2 py-1 text-xs font-medium text-slate-700 hover:bg-white"
+                              onClick={() => handleApplySavedBundle(bundle)}
+                            >
+                              {bundle.name}
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded-full p-1 text-slate-400 hover:bg-white hover:text-red-600"
+                              disabled={deletingBundleId === bundle.id}
+                              onClick={() => handleDeleteBundle(bundle.id, bundle.name)}
+                              aria-label={`Delete ${bundle.name}`}
+                            >
+                              {deletingBundleId === bundle.id ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Trash2 className="h-3.5 w-3.5" />
+                              )}
+                            </button>
+                          </div>
+                        ))}
+                        {resolvedBundles.length === 0 ? (
+                          <p className="text-xs text-slate-500">
+                            No saved facility bundles yet.
+                          </p>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
                   <div className="space-y-4 rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
                     <div className="grid gap-3 lg:grid-cols-[220px_minmax(0,1fr)_auto]">
-                      <div className="space-y-2">
-                        <Label htmlFor="test-category-select">Category</Label>
-                        <select
-                          id="test-category-select"
-                          className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm"
+                    <div className="space-y-2">
+                      <Label htmlFor="test-category-select">Category</Label>
+                      <select
+                        id="test-category-select"
+                        className={cn(
+                          "h-10 w-full rounded-lg border border-border bg-background px-3 text-sm",
+                          receptionistMode && "h-12 text-base"
+                        )}
                           value={selectedCategory}
                           onChange={(event) => {
                             setSelectedCategory(event.target.value as TestCategoryOption | "");
@@ -1210,7 +1527,7 @@ export function OrdersManagement() {
                           <Input
                             ref={testInputRef}
                             id="test-search-input"
-                            className="pl-9"
+                            className={cn("pl-9", receptionistMode && "h-12 text-base")}
                             value={testSearch}
                             onFocus={() => setTestPickerOpen(true)}
                             onBlur={() => {
@@ -1240,7 +1557,7 @@ export function OrdersManagement() {
                               if (event.key === "Enter" && highlightedCatalogueTest) {
                                 event.preventDefault();
                                 selectCatalogueTest(highlightedCatalogueTest);
-                                handleAddSelectedTest();
+                                handleAddSelectedTest(highlightedCatalogueTest.id);
                               }
                             }}
                             placeholder="Search test code or name"
@@ -1264,21 +1581,22 @@ export function OrdersManagement() {
                                     type="button"
                                     className={cn(
                                       "flex w-full items-start justify-between rounded-xl px-3 py-3 text-left transition",
-                                      index === highlightedTestIndex
+                                  index === highlightedTestIndex
                                         ? "bg-blue-50 text-blue-900"
                                         : "hover:bg-slate-50"
                                     )}
                                     onMouseDown={(event) => event.preventDefault()}
                                     onClick={() => selectCatalogueTest(test)}
                                   >
-                                    <div className="min-w-0">
-                                      <p className="font-medium">
-                                        {test.test_code} - {test.name}
-                                      </p>
-                                      <p className="text-xs text-slate-500">
-                                        {getTestCategoryLabel(test.category)} / N
-                                        {Number(test.price).toLocaleString("en-NG")}
-                                      </p>
+                                  <div className="min-w-0">
+                                    <p className="font-medium">
+                                      {renderHighlightedText(test.test_code, testSearch)} -{" "}
+                                      {renderHighlightedText(test.name, testSearch)}
+                                    </p>
+                                    <p className="text-xs text-slate-500">
+                                      {getTestCategoryLabel(test.category)} / N
+                                      {Number(test.price).toLocaleString("en-NG")}
+                                    </p>
                                     </div>
                                     <ArrowRight className="mt-0.5 h-4 w-4 text-slate-400" />
                                   </button>
@@ -1294,7 +1612,8 @@ export function OrdersManagement() {
                           type="button"
                           variant="outline"
                           disabled={!selectedCatalogueTestId}
-                          onClick={handleAddSelectedTest}
+                          className={cn(receptionistMode && "h-12 px-5 text-base")}
+                          onClick={() => handleAddSelectedTest()}
                         >
                           Add test
                         </Button>
@@ -1342,35 +1661,6 @@ export function OrdersManagement() {
                   {errors.selected_test_ids ? (
                     <p className="text-xs text-red-700">{errors.selected_test_ids}</p>
                   ) : null}
-                </div>
-
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div className="space-y-2">
-                    <Label htmlFor="priority">Priority</Label>
-                    <select
-                      id="priority"
-                      className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm"
-                      value={formState.priority}
-                      onChange={(event) =>
-                        setFormState((current) => ({
-                          ...current,
-                          priority: event.target.value as OrderFormValues["priority"]
-                        }))
-                      }
-                    >
-                      {priorityOptions.map((priority) => (
-                        <option key={priority} value={priority}>
-                          {priority}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Selected tests</Label>
-                    <div className="flex h-10 items-center rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm text-slate-600">
-                      {selectedTests.length} selected
-                    </div>
-                  </div>
                 </div>
 
                 <div className="space-y-2">
@@ -1467,30 +1757,41 @@ export function OrdersManagement() {
                             No tests selected yet.
                           </p>
                         ) : (
-                          <div className="mt-3 space-y-2">
-                            {selectedTests.map((test) => (
-                              <div
-                                key={test.id}
-                                className="flex items-start justify-between gap-3 rounded-xl border border-slate-100 bg-slate-50 px-3 py-3"
-                              >
-                                <div className="min-w-0">
-                                  <p className="text-sm font-medium text-slate-950">
-                                    {test.test_code} - {test.name}
-                                  </p>
-                                  <p className="text-xs text-slate-500">
-                                    {getTestCategoryLabel(test.category)}
+                          receptionistMode ? (
+                            <p className="mt-3 text-sm text-slate-600">
+                              {selectedTests.length} test{selectedTests.length > 1 ? "s" : ""} selected for this request.
+                            </p>
+                          ) : (
+                            <div className="mt-3 space-y-2">
+                              {selectedTests.map((test) => (
+                                <div
+                                  key={test.id}
+                                  className="flex items-start justify-between gap-3 rounded-xl border border-slate-100 bg-slate-50 px-3 py-3"
+                                >
+                                  <div className="min-w-0">
+                                    <p className="text-sm font-medium text-slate-950">
+                                      {test.test_code} - {test.name}
+                                    </p>
+                                    <p className="text-xs text-slate-500">
+                                      {getTestCategoryLabel(test.category)}
+                                    </p>
+                                  </div>
+                                  <p className="text-sm font-medium text-slate-700">
+                                    N{Number(test.price).toLocaleString("en-NG")}
                                   </p>
                                 </div>
-                                <p className="text-sm font-medium text-slate-700">
-                                  N{Number(test.price).toLocaleString("en-NG")}
-                                </p>
-                              </div>
-                            ))}
-                          </div>
+                              ))}
+                            </div>
+                          )
                         )}
                       </div>
 
-                      <div className="rounded-2xl border border-dashed border-blue-200 bg-blue-50 p-4">
+                      <div
+                        className={cn(
+                          "rounded-2xl border border-dashed border-blue-200 bg-blue-50 p-4",
+                          receptionistMode && "hidden"
+                        )}
+                      >
                         <div className="flex items-start gap-3">
                           <Keyboard className="mt-0.5 h-4 w-4 text-blue-700" />
                           <div className="space-y-2 text-sm text-blue-900">

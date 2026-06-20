@@ -816,6 +816,19 @@ create table if not exists public.audit_logs (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.test_bundles (
+  id uuid primary key default gen_random_uuid(),
+  facility_id uuid not null references public.facilities(id) on delete cascade default public.default_facility_id(),
+  name text not null,
+  description text,
+  test_ids uuid[] not null default '{}'::uuid[],
+  is_active boolean not null default true,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (facility_id, name)
+);
+
 create table if not exists public.lab_branding_settings (
   facility_id uuid primary key references public.facilities(id) on delete cascade,
   lab_name text,
@@ -2334,6 +2347,11 @@ create trigger set_tests_updated_at
 before update on public.tests
 for each row execute procedure public.set_updated_at();
 
+drop trigger if exists set_test_bundles_updated_at on public.test_bundles;
+create trigger set_test_bundles_updated_at
+before update on public.test_bundles
+for each row execute procedure public.set_updated_at();
+
 drop trigger if exists set_lab_branding_settings_updated_at on public.lab_branding_settings;
 create trigger set_lab_branding_settings_updated_at
 before update on public.lab_branding_settings
@@ -2421,6 +2439,9 @@ create index if not exists audit_logs_facility_id_idx
 create index if not exists audit_logs_entity_idx
   on public.audit_logs (entity_table, entity_id, created_at desc);
 
+create index if not exists test_bundles_facility_name_idx
+  on public.test_bundles (facility_id, is_active, name);
+
 create index if not exists lab_branding_settings_facility_idx
   on public.lab_branding_settings (facility_id);
 
@@ -2499,6 +2520,7 @@ alter table public.sample_custody_logs enable row level security;
 alter table public.order_test_results enable row level security;
 alter table public.audit_logs enable row level security;
 alter table public.tests enable row level security;
+alter table public.test_bundles enable row level security;
 alter table public.lab_branding_settings enable row level security;
 alter table public.activity_notifications enable row level security;
 alter table public.qc_controls enable row level security;
@@ -2859,6 +2881,25 @@ create policy "Facility users can insert audit logs"
 on public.audit_logs
 for insert
 with check (public.facility_access_allowed(facility_id));
+
+drop policy if exists "Facility users can read test bundles" on public.test_bundles;
+create policy "Facility users can read test bundles"
+on public.test_bundles
+for select
+using (public.facility_access_allowed(facility_id));
+
+drop policy if exists "Order creators can manage test bundles" on public.test_bundles;
+create policy "Order creators can manage test bundles"
+on public.test_bundles
+for all
+using (
+  public.facility_access_allowed(facility_id)
+  and public.current_user_can_create_orders()
+)
+with check (
+  public.facility_access_allowed(facility_id)
+  and public.current_user_can_create_orders()
+);
 
 drop policy if exists "Facility users can read lab branding" on public.lab_branding_settings;
 create policy "Facility users can read lab branding"
