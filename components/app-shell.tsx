@@ -72,6 +72,12 @@ const navigation: NavigationItem[] = [
     roles: ["Admin", "LabScientist", "Verifier"] as AppRole[]
   },
   {
+    href: "/qc",
+    label: "Quality Control",
+    icon: FlaskConical,
+    roles: ["Admin", "LabScientist", "Verifier"] as AppRole[]
+  },
+  {
     href: "/reports",
     label: "Reports",
     icon: FileText,

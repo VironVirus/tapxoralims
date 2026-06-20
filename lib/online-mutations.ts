@@ -289,35 +289,20 @@ export async function verifyResult(args: {
   orderTest: Pick<Tables<"order_tests">, "id" | "order_id" | "sample_code" | "status">;
   result: Tables<"order_test_results">;
 }) {
-  const now = nowIso();
-  await commitOnlineMutation({
-    action: "update",
-    entity: "order_test_results",
-    payload: {
-      verified_at: now,
-      verified_by: args.actorId ?? null
-    } as Json,
-    recordId: args.result.id
+  const supabase = requireSupabase() as unknown as {
+    rpc: (
+      fn: string,
+      args: Record<string, unknown>
+    ) => Promise<{ error: Error | null }>;
+  };
+  const { error } = await supabase.rpc("verify_result", {
+    target_result_id: args.result.id,
+    verification_notes: null
   });
 
-  await updateSampleStatus({
-    actorId: args.actorId,
-    facilityId: args.facilityId,
-    nextStatus: "Verified",
-    sample: args.orderTest
-  });
-
-  await recordAuditLog({
-    action: "result_verified",
-    actorId: args.actorId ?? null,
-    entityId: args.result.id,
-    entityTable: "order_test_results",
-    facilityId: args.facilityId,
-    payload: {
-      sample_code: args.orderTest.sample_code,
-      verified_at: now
-    }
-  });
+  if (error) {
+    throw error;
+  }
 }
 
 export async function applyInventoryTransaction(args: {

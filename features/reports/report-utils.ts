@@ -31,6 +31,17 @@ export type ReportBranding = {
   supportLine: string;
 };
 
+export type ReportBrandingSettings = {
+  accreditation?: string | null;
+  address?: string | null;
+  lab_name?: string | null;
+  logo_url?: string | null;
+  report_footer?: string | null;
+  signatory_name?: string | null;
+  signatory_title?: string | null;
+  support_line?: string | null;
+};
+
 export type ReportResultRow = {
   abnormal: boolean;
   abnormalReason: string | null;
@@ -103,18 +114,20 @@ export function formatStatusLabel(status: string) {
 
 export function buildReportBranding(
   facilityName: string | null | undefined,
-  logoUrl?: string
+  logoUrl?: string,
+  settings?: ReportBrandingSettings | null
 ): ReportBranding {
   return {
-    labName: facilityName || "LIMS Nigeria Diagnostics",
-    accreditation: "ISO-aligned diagnostic workflow",
-    address: "Clinical reporting suite, Lagos, Nigeria",
-    supportLine: "support@lims.ng | +234 800 000 0000",
+    labName: settings?.lab_name || facilityName || "LIMS Nigeria Diagnostics",
+    accreditation: settings?.accreditation || "ISO-aligned diagnostic workflow",
+    address: settings?.address || "Clinical reporting suite, Lagos, Nigeria",
+    supportLine: settings?.support_line || "support@lims.ng | +234 800 000 0000",
     footerNote:
+      settings?.report_footer ||
       "Results should be interpreted alongside clinical findings and patient history.",
-    signatoryName: "HOD of Lab / Chief Scientist",
-    signatoryTitle: "Head of Laboratory / Chief Scientist",
-    logoUrl
+    signatoryName: settings?.signatory_name || "HOD of Lab / Chief Scientist",
+    signatoryTitle: settings?.signatory_title || "Head of Laboratory / Chief Scientist",
+    logoUrl: settings?.logo_url || logoUrl
   };
 }
 

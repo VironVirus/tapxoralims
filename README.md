@@ -104,6 +104,9 @@ The app now writes directly to Supabase. Offline queues, IndexedDB sync, service
 - Billing and receipts
 - Dashboards
 - Full audit log viewer
+- Lab branding settings for reports
+- Branch / multi-facility dashboard support
+- QC controls, calibration logs, and analyzer maintenance
 
 ## Netlify Deployment
 
@@ -120,6 +123,10 @@ Set these environment variables in Netlify:
 
 If you use Netlify’s Next.js runtime, keep the project as a standard Next.js app and let Netlify detect it automatically.
 
+## Backup and Restore
+
+Before public launch, enable scheduled Supabase backups and run a restore drill. Follow the runbook in [`docs/backup-restore-runbook.md`](/C:/Users/user/Desktop/lab/docs/backup-restore-runbook.md).
+
 ## Important Post-Update Step
 
 If your Supabase project was created before the latest patient-consent polish, rerun [`supabase/schema.sql`](/C:/Users/user/Desktop/lab/supabase/schema.sql) so these fields exist:
@@ -134,6 +141,7 @@ This is required for the patient registration form and patient history view to w
 - RLS is enabled across the main operational tables.
 - Facility-scoped access is enforced in SQL policies.
 - Role changes remain restricted to administrators.
+- HOD of Lab / Chief Scientist verification uses a dedicated `verify_result` RPC instead of broad result-row update permission.
 - Audit logs capture key operational changes.
 
 ## Useful Commands

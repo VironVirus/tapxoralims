@@ -56,9 +56,13 @@ create table if not exists public.facilities (
   id uuid primary key default gen_random_uuid(),
   name text not null,
   code text not null unique,
+  parent_facility_id uuid references public.facilities(id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table if exists public.facilities
+  add column if not exists parent_facility_id uuid references public.facilities(id) on delete set null;
 
 insert into public.facilities (name, code)
 values ('Main Laboratory', 'MAIN-LAB')
@@ -392,6 +396,46 @@ as $$
   select public.current_user_has_role(array['Admin', 'LabScientist', 'Verifier']::public.app_role[]);
 $$;
 
+create or replace function public.current_user_can_verify_results()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.current_user_has_role(array['Admin', 'Verifier']::public.app_role[]);
+$$;
+
+create or replace function public.current_user_can_manage_branding()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.current_user_has_role(array['Admin']::public.app_role[]);
+$$;
+
+create or replace function public.current_user_can_access_qc()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.current_user_has_role(array['Admin', 'LabScientist', 'Verifier']::public.app_role[]);
+$$;
+
+create or replace function public.current_user_can_manage_qc()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.current_user_has_role(array['Admin', 'LabScientist']::public.app_role[]);
+$$;
+
 create or replace function public.current_user_facility_id()
 returns uuid
 language sql
@@ -414,7 +458,27 @@ set search_path = public
 as $$
   select auth.role() = 'authenticated'
     and target_facility_id is not null
-    and public.current_user_facility_id() = target_facility_id;
+    and exists (
+      select 1
+      from public.profiles p
+      left join public.facilities user_facility on user_facility.id = p.facility_id
+      left join public.facilities target_facility on target_facility.id = target_facility_id
+      where p.id = auth.uid()
+        and (
+          p.facility_id = target_facility_id
+          or (
+            p.role = 'Admin'
+            and p.facility_id is not null
+            and (
+              target_facility.parent_facility_id = p.facility_id
+              or (
+                user_facility.parent_facility_id is not null
+                and target_facility.parent_facility_id = user_facility.parent_facility_id
+              )
+            )
+          )
+        )
+    );
 $$;
 
 create or replace function public.patient_in_current_facility(target_patient_id uuid)
@@ -750,6 +814,115 @@ create table if not exists public.audit_logs (
   payload jsonb not null default '{}'::jsonb,
   actor_id uuid references auth.users(id) on delete set null,
   created_at timestamptz not null default now()
+);
+
+create table if not exists public.lab_branding_settings (
+  facility_id uuid primary key references public.facilities(id) on delete cascade,
+  lab_name text,
+  logo_url text,
+  address text,
+  support_line text,
+  accreditation text,
+  signatory_name text,
+  signatory_title text,
+  report_footer text,
+  updated_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.activity_notifications (
+  id uuid primary key default gen_random_uuid(),
+  facility_id uuid not null references public.facilities(id) on delete cascade,
+  type text not null check (
+    type in (
+      'pending_verification',
+      'low_stock',
+      'near_expiry',
+      'unpaid_invoice',
+      'system'
+    )
+  ),
+  severity text not null default 'info' check (severity in ('info', 'warning', 'critical')),
+  title text not null,
+  message text not null,
+  entity_table text,
+  entity_id uuid,
+  created_for uuid references auth.users(id) on delete cascade,
+  is_read boolean not null default false,
+  read_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.qc_controls (
+  id uuid primary key default gen_random_uuid(),
+  facility_id uuid not null references public.facilities(id) on delete restrict default public.default_facility_id(),
+  test_id uuid references public.tests(id) on delete set null,
+  name text not null,
+  lot_number text,
+  level text,
+  expected_value text,
+  min_value numeric(12,4),
+  max_value numeric(12,4),
+  unit text,
+  expiry_date date,
+  is_active boolean not null default true,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.qc_runs (
+  id uuid primary key default gen_random_uuid(),
+  facility_id uuid not null references public.facilities(id) on delete restrict default public.default_facility_id(),
+  control_id uuid not null references public.qc_controls(id) on delete cascade,
+  performed_at timestamptz not null default now(),
+  value_numeric numeric(12,4),
+  value_text text,
+  status text not null default 'review' check (status in ('pass', 'fail', 'review')),
+  notes text,
+  performed_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.analyzers (
+  id uuid primary key default gen_random_uuid(),
+  facility_id uuid not null references public.facilities(id) on delete restrict default public.default_facility_id(),
+  name text not null,
+  model text,
+  serial_number text,
+  location text,
+  is_active boolean not null default true,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.calibration_logs (
+  id uuid primary key default gen_random_uuid(),
+  facility_id uuid not null references public.facilities(id) on delete restrict default public.default_facility_id(),
+  analyzer_id uuid not null references public.analyzers(id) on delete cascade,
+  calibration_date date not null default current_date,
+  due_date date,
+  status text not null default 'current' check (status in ('current', 'due', 'overdue')),
+  notes text,
+  performed_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.maintenance_logs (
+  id uuid primary key default gen_random_uuid(),
+  facility_id uuid not null references public.facilities(id) on delete restrict default public.default_facility_id(),
+  analyzer_id uuid not null references public.analyzers(id) on delete cascade,
+  maintenance_date date not null default current_date,
+  maintenance_type text not null default 'Preventive',
+  due_date date,
+  status text not null default 'completed' check (status in ('completed', 'due', 'overdue')),
+  notes text,
+  performed_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
 );
 
 create or replace function public.order_record_in_current_facility(target_order_id uuid)
@@ -1354,6 +1527,98 @@ begin
     reported_at = case when next_status = 'Reported' then coalesce(reported_at, now()) else null end,
     updated_at = now()
   where id = target_order_id;
+end;
+$$;
+
+drop function if exists public.verify_result(uuid, text);
+create or replace function public.verify_result(
+  target_result_id uuid,
+  verification_notes text default null
+)
+returns table (
+  result_id uuid,
+  order_test_id uuid,
+  order_id uuid,
+  sample_code text,
+  verified_at timestamptz
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  result_record record;
+  verification_time timestamptz := now();
+begin
+  if not public.current_user_can_verify_results() then
+    raise exception 'Only administrators and HOD of Lab / Chief Scientist can verify results';
+  end if;
+
+  select
+    otr.id,
+    otr.order_test_id,
+    ot.order_id,
+    ot.sample_code,
+    o.facility_id
+  into result_record
+  from public.order_test_results otr
+  join public.order_tests ot on ot.id = otr.order_test_id
+  join public.orders o on o.id = ot.order_id
+  where otr.id = target_result_id
+  for update of otr;
+
+  if result_record.id is null then
+    raise exception 'Result was not found';
+  end if;
+
+  if not public.facility_access_allowed(result_record.facility_id) then
+    raise exception 'You can only verify results inside your assigned facility or branch group';
+  end if;
+
+  update public.order_test_results
+  set
+    verified_at = verification_time,
+    verified_by = auth.uid(),
+    updated_at = verification_time
+  where id = target_result_id;
+
+  update public.order_tests
+  set
+    status = 'Verified',
+    verified_at = verification_time,
+    updated_at = verification_time
+  where id = result_record.order_test_id;
+
+  insert into public.audit_logs (
+    facility_id,
+    entity_table,
+    entity_id,
+    action,
+    actor_id,
+    payload
+  )
+  values (
+    result_record.facility_id,
+    'order_test_results',
+    target_result_id,
+    'result_verified',
+    auth.uid(),
+    jsonb_build_object(
+      'sample_code', result_record.sample_code,
+      'verification_notes', verification_notes,
+      'verified_at', verification_time
+    )
+  );
+
+  perform public.refresh_order_status(result_record.order_id);
+
+  return query
+  select
+    target_result_id,
+    result_record.order_test_id::uuid,
+    result_record.order_id::uuid,
+    result_record.sample_code::text,
+    verification_time;
 end;
 $$;
 
@@ -2069,6 +2334,31 @@ create trigger set_tests_updated_at
 before update on public.tests
 for each row execute procedure public.set_updated_at();
 
+drop trigger if exists set_lab_branding_settings_updated_at on public.lab_branding_settings;
+create trigger set_lab_branding_settings_updated_at
+before update on public.lab_branding_settings
+for each row execute procedure public.set_updated_at();
+
+drop trigger if exists set_qc_controls_updated_at on public.qc_controls;
+create trigger set_qc_controls_updated_at
+before update on public.qc_controls
+for each row execute procedure public.set_updated_at();
+
+drop trigger if exists set_analyzers_updated_at on public.analyzers;
+create trigger set_analyzers_updated_at
+before update on public.analyzers
+for each row execute procedure public.set_updated_at();
+
+drop trigger if exists set_calibration_logs_updated_at on public.calibration_logs;
+create trigger set_calibration_logs_updated_at
+before update on public.calibration_logs
+for each row execute procedure public.set_updated_at();
+
+drop trigger if exists set_maintenance_logs_updated_at on public.maintenance_logs;
+create trigger set_maintenance_logs_updated_at
+before update on public.maintenance_logs
+for each row execute procedure public.set_updated_at();
+
 drop trigger if exists sync_test_code_defaults on public.tests;
 create trigger sync_test_code_defaults
 before insert or update of category, test_code on public.tests
@@ -2131,6 +2421,15 @@ create index if not exists audit_logs_facility_id_idx
 create index if not exists audit_logs_entity_idx
   on public.audit_logs (entity_table, entity_id, created_at desc);
 
+create index if not exists lab_branding_settings_facility_idx
+  on public.lab_branding_settings (facility_id);
+
+create index if not exists activity_notifications_facility_read_idx
+  on public.activity_notifications (facility_id, is_read, created_at desc);
+
+create index if not exists activity_notifications_type_idx
+  on public.activity_notifications (facility_id, type, severity, created_at desc);
+
 create index if not exists inventory_items_facility_name_idx
   on public.inventory_items (facility_id, name);
 
@@ -2170,6 +2469,21 @@ create index if not exists expenses_facility_date_idx
 create index if not exists expenses_facility_category_idx
   on public.expenses (facility_id, category, expense_date desc);
 
+create index if not exists qc_controls_facility_active_idx
+  on public.qc_controls (facility_id, is_active, expiry_date);
+
+create index if not exists qc_runs_control_performed_idx
+  on public.qc_runs (control_id, performed_at desc);
+
+create index if not exists analyzers_facility_active_idx
+  on public.analyzers (facility_id, is_active, name);
+
+create index if not exists calibration_logs_facility_due_idx
+  on public.calibration_logs (facility_id, due_date, status);
+
+create index if not exists maintenance_logs_facility_due_idx
+  on public.maintenance_logs (facility_id, due_date, status);
+
 alter table public.facilities enable row level security;
 alter table public.profiles enable row level security;
 alter table public.patients enable row level security;
@@ -2185,6 +2499,13 @@ alter table public.sample_custody_logs enable row level security;
 alter table public.order_test_results enable row level security;
 alter table public.audit_logs enable row level security;
 alter table public.tests enable row level security;
+alter table public.lab_branding_settings enable row level security;
+alter table public.activity_notifications enable row level security;
+alter table public.qc_controls enable row level security;
+alter table public.qc_runs enable row level security;
+alter table public.analyzers enable row level security;
+alter table public.calibration_logs enable row level security;
+alter table public.maintenance_logs enable row level security;
 
 drop policy if exists "Authenticated can read facilities" on public.facilities;
 create policy "Authenticated can read facilities"
@@ -2520,11 +2841,11 @@ on public.order_test_results
 for update
 using (
   public.order_test_in_current_facility(order_test_id)
-  and public.current_user_can_update_results()
+  and public.current_user_can_enter_results()
 )
 with check (
   public.order_test_in_current_facility(order_test_id)
-  and public.current_user_can_update_results()
+  and public.current_user_can_enter_results()
 );
 
 drop policy if exists "Facility users can read audit logs" on public.audit_logs;
@@ -2538,6 +2859,166 @@ create policy "Facility users can insert audit logs"
 on public.audit_logs
 for insert
 with check (public.facility_access_allowed(facility_id));
+
+drop policy if exists "Facility users can read lab branding" on public.lab_branding_settings;
+create policy "Facility users can read lab branding"
+on public.lab_branding_settings
+for select
+using (public.facility_access_allowed(facility_id));
+
+drop policy if exists "Admins can manage lab branding" on public.lab_branding_settings;
+create policy "Admins can manage lab branding"
+on public.lab_branding_settings
+for all
+using (
+  public.facility_access_allowed(facility_id)
+  and public.current_user_can_manage_branding()
+)
+with check (
+  public.facility_access_allowed(facility_id)
+  and public.current_user_can_manage_branding()
+);
+
+drop policy if exists "Facility users can read activity notifications" on public.activity_notifications;
+create policy "Facility users can read activity notifications"
+on public.activity_notifications
+for select
+using (
+  public.facility_access_allowed(facility_id)
+  and (created_for is null or created_for = auth.uid())
+);
+
+drop policy if exists "Facility users can update own activity notifications" on public.activity_notifications;
+create policy "Facility users can update own activity notifications"
+on public.activity_notifications
+for update
+using (
+  public.facility_access_allowed(facility_id)
+  and (created_for is null or created_for = auth.uid())
+)
+with check (
+  public.facility_access_allowed(facility_id)
+  and (created_for is null or created_for = auth.uid())
+);
+
+drop policy if exists "Admins can manage activity notifications" on public.activity_notifications;
+create policy "Admins can manage activity notifications"
+on public.activity_notifications
+for all
+using (
+  public.facility_access_allowed(facility_id)
+  and public.current_user_is_admin()
+)
+with check (
+  public.facility_access_allowed(facility_id)
+  and public.current_user_is_admin()
+);
+
+drop policy if exists "QC users can read controls" on public.qc_controls;
+create policy "QC users can read controls"
+on public.qc_controls
+for select
+using (
+  public.facility_access_allowed(facility_id)
+  and public.current_user_can_access_qc()
+);
+
+drop policy if exists "QC managers can manage controls" on public.qc_controls;
+create policy "QC managers can manage controls"
+on public.qc_controls
+for all
+using (
+  public.facility_access_allowed(facility_id)
+  and public.current_user_can_manage_qc()
+)
+with check (
+  public.facility_access_allowed(facility_id)
+  and public.current_user_can_manage_qc()
+);
+
+drop policy if exists "QC users can read runs" on public.qc_runs;
+create policy "QC users can read runs"
+on public.qc_runs
+for select
+using (
+  public.facility_access_allowed(facility_id)
+  and public.current_user_can_access_qc()
+);
+
+drop policy if exists "QC managers can insert runs" on public.qc_runs;
+create policy "QC managers can insert runs"
+on public.qc_runs
+for insert
+with check (
+  public.facility_access_allowed(facility_id)
+  and public.current_user_can_manage_qc()
+);
+
+drop policy if exists "QC users can read analyzers" on public.analyzers;
+create policy "QC users can read analyzers"
+on public.analyzers
+for select
+using (
+  public.facility_access_allowed(facility_id)
+  and public.current_user_can_access_qc()
+);
+
+drop policy if exists "QC managers can manage analyzers" on public.analyzers;
+create policy "QC managers can manage analyzers"
+on public.analyzers
+for all
+using (
+  public.facility_access_allowed(facility_id)
+  and public.current_user_can_manage_qc()
+)
+with check (
+  public.facility_access_allowed(facility_id)
+  and public.current_user_can_manage_qc()
+);
+
+drop policy if exists "QC users can read calibration logs" on public.calibration_logs;
+create policy "QC users can read calibration logs"
+on public.calibration_logs
+for select
+using (
+  public.facility_access_allowed(facility_id)
+  and public.current_user_can_access_qc()
+);
+
+drop policy if exists "QC managers can manage calibration logs" on public.calibration_logs;
+create policy "QC managers can manage calibration logs"
+on public.calibration_logs
+for all
+using (
+  public.facility_access_allowed(facility_id)
+  and public.current_user_can_manage_qc()
+)
+with check (
+  public.facility_access_allowed(facility_id)
+  and public.current_user_can_manage_qc()
+);
+
+drop policy if exists "QC users can read maintenance logs" on public.maintenance_logs;
+create policy "QC users can read maintenance logs"
+on public.maintenance_logs
+for select
+using (
+  public.facility_access_allowed(facility_id)
+  and public.current_user_can_access_qc()
+);
+
+drop policy if exists "QC managers can manage maintenance logs" on public.maintenance_logs;
+create policy "QC managers can manage maintenance logs"
+on public.maintenance_logs
+for all
+using (
+  public.facility_access_allowed(facility_id)
+  and public.current_user_can_manage_qc()
+)
+with check (
+  public.facility_access_allowed(facility_id)
+  and public.current_user_can_manage_qc()
+);
 
 drop policy if exists "Authenticated can read tests" on public.tests;
 create policy "Authenticated can read tests"

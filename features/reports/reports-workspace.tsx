@@ -43,6 +43,7 @@ import {
 } from "@/features/reports/report-utils";
 import { printHtmlDocument } from "@/lib/print";
 import { useToast } from "@/hooks/use-toast";
+import { fetchLabBrandingSettings } from "@/features/admin/lab-branding-settings";
 import { canAccessReportsRole } from "@/lib/guards";
 import { resolveOnlineQuery } from "@/lib/online-core";
 import { markReportsReleased } from "@/lib/online-mutations";
@@ -103,14 +104,25 @@ export function ReportsWorkspace() {
   const orderIdFilter = searchParams.get("orderId");
 
   const reportsQuery = useQuery({
-    queryKey: ["reports-queue"],
+    queryKey: ["reports-queue", facilityId],
     queryFn: fetchReportsQueue,
     enabled: Boolean(facilityId)
   });
 
+  const brandingQuery = useQuery({
+    queryKey: ["lab-branding", facilityId],
+    queryFn: () => fetchLabBrandingSettings(facilityId as string),
+    enabled: Boolean(facilityId)
+  });
+
   const branding = useMemo(
-    () => buildReportBranding(reportsQuery.data?.[0]?.facilities?.name ?? null),
-    [reportsQuery.data]
+    () =>
+      buildReportBranding(
+        reportsQuery.data?.[0]?.facilities?.name ?? null,
+        undefined,
+        brandingQuery.data
+      ),
+    [brandingQuery.data, reportsQuery.data]
   );
 
   const filteredOrders = useMemo(() => {

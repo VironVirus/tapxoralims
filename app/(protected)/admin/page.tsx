@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Activity, TestTube2, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { LabBrandingSettingsPanel } from "@/features/admin/lab-branding-settings";
 import { UserManagementPanel } from "@/features/admin/user-management";
 
 export default function AdminPage() {
@@ -68,6 +69,8 @@ export default function AdminPage() {
       </div>
 
       <UserManagementPanel />
+
+      <LabBrandingSettingsPanel />
     </div>
   );
 }

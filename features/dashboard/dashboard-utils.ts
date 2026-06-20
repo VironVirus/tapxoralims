@@ -17,9 +17,15 @@ export type DashboardWorklistRow = {
   updated_at: string;
   verified_at: string | null;
   orders: {
+    facility_id: string;
     order_number: string;
     ordered_at: string;
     priority: string;
+    facilities: {
+      code: string;
+      id: string;
+      name: string;
+    } | null;
     patients: {
       lab_id: string;
       name: string;
@@ -29,15 +35,15 @@ export type DashboardWorklistRow = {
 
 export type DashboardInvoiceRow = Pick<
   Tables<"invoices">,
-  "amount_paid" | "id" | "issued_at" | "payment_status" | "total_amount"
+  "amount_paid" | "facility_id" | "id" | "issued_at" | "payment_status" | "total_amount"
 >;
 
 export type DashboardPaymentRow = Pick<
   Tables<"invoice_payments">,
-  "amount" | "payment_method" | "received_at"
+  "amount" | "facility_id" | "payment_method" | "received_at"
 >;
 
-export type DashboardPatientRow = Pick<Tables<"patients">, "created_at" | "id">;
+export type DashboardPatientRow = Pick<Tables<"patients">, "created_at" | "facility_id" | "id">;
 
 export type DashboardInventoryAlertRow = Pick<
   Tables<"inventory_items">,

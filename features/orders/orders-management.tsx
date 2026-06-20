@@ -6,16 +6,22 @@ import {
   useDeferredValue,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  ArrowRight,
   ClipboardPlus,
   FileText,
   FlaskConical,
+  Keyboard,
   Loader2,
+  PanelRightClose,
+  PanelRightOpen,
   PencilLine,
+  Sparkles,
   Search,
   ShieldAlert
 } from "lucide-react";
@@ -64,6 +70,7 @@ import {
 import { resolveOnlineQuery } from "@/lib/online-core";
 import { printHtmlDocument } from "@/lib/print";
 import { getSupabaseBrowserClient } from "@/lib/supabase";
+import { cn } from "@/lib/utils";
 import type { Database, Tables } from "@/types/supabase";
 
 type PatientSearchRow =
@@ -98,9 +105,87 @@ type RecentOrderRow = {
 type FormErrors = Partial<Record<keyof OrderFormValues | "form", string>>;
 type RecentOrderFilter = "all" | SampleStatus;
 type TestCategoryOption = TestCategory | "Uncategorized";
+type QuickBundleDefinition = {
+  id: string;
+  label: string;
+  matcherGroups: string[][];
+};
+
+type QuickBundleMatch = {
+  id: string;
+  label: string;
+  matchedTests: TestRow[];
+  missingCount: number;
+};
+
+const quickBundleDefinitions: QuickBundleDefinition[] = [
+  {
+    id: "fbc",
+    label: "FBC",
+    matcherGroups: [["fbc", "full blood count", "complete blood count", "cbc"]]
+  },
+  {
+    id: "malaria-widal",
+    label: "Malaria + Widal",
+    matcherGroups: [
+      ["malaria", "malaria parasite", "mp", "mps"],
+      ["widal", "salmonella agglutination"]
+    ]
+  },
+  {
+    id: "rvs-hbsag",
+    label: "RVS + HBsAg",
+    matcherGroups: [
+      ["rvs", "retroviral screening", "hiv"],
+      ["hbsag", "hepatitis b", "hepatitis b surface antigen"]
+    ]
+  }
+];
 
 const invoicePrintSelect =
   "id, facility_id, order_id, invoice_number, subtotal, discount_amount, total_amount, amount_paid, payment_status, notes, issued_at, due_at, created_at, created_by, updated_at, orders(id, facility_id, patient_id, order_number, ordered_at, priority, status, reported_at, created_at, updated_at, facilities(id, name, code), patients(id, name, lab_id, phone)), invoice_items(id, invoice_id, order_test_id, test_name, quantity, unit_price, line_total, created_at), invoice_payments(id, facility_id, invoice_id, receipt_number, amount, payment_method, reference_number, notes, received_at, received_by, created_at)";
+
+function normalizeLookupValue(value: string | null | undefined) {
+  return (value ?? "").trim().toLowerCase();
+}
+
+function formatPatientOption(patient: PatientSearchRow) {
+  return `${patient.name} / ${patient.lab_id}`;
+}
+
+function findQuickBundleMatches(tests: TestRow[]): QuickBundleMatch[] {
+  const pool = tests.map((test) => ({
+    key: `${normalizeLookupValue(test.test_code)} ${normalizeLookupValue(test.name)}`,
+    test
+  }));
+
+  return quickBundleDefinitions.map((definition) => {
+    const usedIds = new Set<string>();
+    const matchedTests = definition.matcherGroups
+      .map((group) => {
+        const match = pool.find(
+          (candidate) =>
+            !usedIds.has(candidate.test.id) &&
+            group.some((term) => candidate.key.includes(term))
+        );
+
+        if (!match) {
+          return null;
+        }
+
+        usedIds.add(match.test.id);
+        return match.test;
+      })
+      .filter((test): test is TestRow => Boolean(test));
+
+    return {
+      id: definition.id,
+      label: definition.label,
+      matchedTests,
+      missingCount: definition.matcherGroups.length - matchedTests.length
+    };
+  });
+}
 
 async function waitForInvoiceRetry(ms: number) {
   await new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -256,8 +341,15 @@ export function OrdersManagement() {
     useState<RecentOrderFilter>("all");
   const [recentPriorityFilter, setRecentPriorityFilter] =
     useState<(typeof priorityOptions)[number] | "all">("all");
+  const [showRecentPanel, setShowRecentPanel] = useState(true);
   const [selectedCategory, setSelectedCategory] = useState<TestCategoryOption | "">("");
   const [selectedCatalogueTestId, setSelectedCatalogueTestId] = useState("");
+  const [testSearch, setTestSearch] = useState("");
+  const deferredTestSearch = useDeferredValue(testSearch);
+  const [patientPickerOpen, setPatientPickerOpen] = useState(false);
+  const [testPickerOpen, setTestPickerOpen] = useState(false);
+  const [highlightedPatientIndex, setHighlightedPatientIndex] = useState(0);
+  const [highlightedTestIndex, setHighlightedTestIndex] = useState(0);
   const [formState, setFormState] = useState<OrderFormValues>(initialOrderFormState);
   const [errors, setErrors] = useState<FormErrors>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -282,6 +374,10 @@ export function OrdersManagement() {
   const [editingOrderId, setEditingOrderId] = useState<string | null>(
     editOrderIdFromQuery
   );
+  const patientInputRef = useRef<HTMLInputElement | null>(null);
+  const testInputRef = useRef<HTMLInputElement | null>(null);
+  const submitButtonRef = useRef<HTMLButtonElement | null>(null);
+  const createdOrderFocusRef = useRef<HTMLDivElement | null>(null);
 
   const canAccessOrders = canAccessOrdersRole(role);
   const canCreateOrders = canCreateOrdersRole(role);
@@ -455,6 +551,18 @@ export function OrdersManagement() {
     [groupedTests, selectedCategory]
   );
 
+  const filteredTestsInSelectedCategory = useMemo(() => {
+    const needle = normalizeLookupValue(deferredTestSearch);
+    if (!needle) {
+      return testsInSelectedCategory;
+    }
+
+    return testsInSelectedCategory.filter((test) =>
+      `${normalizeLookupValue(test.test_code)} ${normalizeLookupValue(test.name)} ${normalizeLookupValue(test.category)}`
+        .includes(needle)
+    );
+  }, [deferredTestSearch, testsInSelectedCategory]);
+
   const selectedTests = useMemo(
     () =>
       formState.selected_test_ids
@@ -462,6 +570,21 @@ export function OrdersManagement() {
         .filter((test): test is TestRow => Boolean(test)),
     [formState.selected_test_ids, testsById]
   );
+
+  const selectedTestsTotal = useMemo(
+    () => selectedTests.reduce((sum, test) => sum + Number(test.price ?? 0), 0),
+    [selectedTests]
+  );
+
+  const quickBundles = useMemo(
+    () => findQuickBundleMatches(testsQuery.data ?? []),
+    [testsQuery.data]
+  );
+
+  const highlightedPatient =
+    (patientsQuery.data ?? [])[highlightedPatientIndex] ?? null;
+  const highlightedCatalogueTest =
+    filteredTestsInSelectedCategory[highlightedTestIndex] ?? null;
 
   useEffect(() => {
     if (availableCategories.length === 0) {
@@ -488,6 +611,68 @@ export function OrdersManagement() {
       setSelectedCatalogueTestId(testsInSelectedCategory[0].id);
     }
   }, [selectedCatalogueTestId, testsInSelectedCategory]);
+
+  useEffect(() => {
+    setHighlightedPatientIndex(0);
+  }, [patientsQuery.data]);
+
+  useEffect(() => {
+    setHighlightedTestIndex(0);
+  }, [filteredTestsInSelectedCategory]);
+
+  useEffect(() => {
+    if (!createdOrder) {
+      return;
+    }
+
+    createdOrderFocusRef.current?.focus();
+    createdOrderFocusRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "start"
+    });
+  }, [createdOrder]);
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const tagName = target?.tagName ?? "";
+      const isTypingTarget =
+        tagName === "INPUT" ||
+        tagName === "TEXTAREA" ||
+        tagName === "SELECT" ||
+        Boolean(target?.isContentEditable);
+
+      if (!isTypingTarget && event.key === "/") {
+        event.preventDefault();
+        setPatientPickerOpen(true);
+        patientInputRef.current?.focus();
+        patientInputRef.current?.select();
+        return;
+      }
+
+      if (event.altKey && event.key.toLowerCase() === "t") {
+        event.preventDefault();
+        setTestPickerOpen(true);
+        testInputRef.current?.focus();
+        testInputRef.current?.select();
+        return;
+      }
+
+      if (event.altKey && event.key.toLowerCase() === "r") {
+        event.preventDefault();
+        setShowRecentPanel((current) => !current);
+        return;
+      }
+
+      if (event.ctrlKey && event.key === "Enter") {
+        event.preventDefault();
+        submitButtonRef.current?.click();
+      }
+    };
+
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, []);
 
   if (loading) {
     return (
@@ -538,6 +723,22 @@ export function OrdersManagement() {
     }));
   };
 
+  const selectPatient = (patient: PatientSearchRow) => {
+    setFormState((current) => ({
+      ...current,
+      patient_id: patient.id
+    }));
+    setPatientSearch(formatPatientOption(patient));
+    setPatientPickerOpen(false);
+    setErrors((current) => ({ ...current, patient_id: undefined }));
+  };
+
+  const selectCatalogueTest = (test: TestRow) => {
+    setSelectedCatalogueTestId(test.id);
+    setTestSearch(`${test.test_code} - ${test.name}`);
+    setTestPickerOpen(false);
+  };
+
   const handleAddSelectedTest = () => {
     if (!selectedCatalogueTestId) {
       return;
@@ -552,6 +753,31 @@ export function OrdersManagement() {
         ...current,
         selected_test_ids: [...current.selected_test_ids, selectedCatalogueTestId]
       };
+    });
+    setErrors((current) => ({ ...current, selected_test_ids: undefined }));
+  };
+
+  const handleApplyQuickBundle = (bundle: QuickBundleMatch) => {
+    if (bundle.missingCount > 0 || bundle.matchedTests.length === 0) {
+      toast({
+        title: "Bundle not ready",
+        description: `${bundle.label} is missing one or more tests in the catalogue.`,
+        variant: "error"
+      });
+      return;
+    }
+
+    setFormState((current) => ({
+      ...current,
+      selected_test_ids: Array.from(
+        new Set([...current.selected_test_ids, ...bundle.matchedTests.map((test) => test.id)])
+      )
+    }));
+    setErrors((current) => ({ ...current, selected_test_ids: undefined }));
+    toast({
+      title: `${bundle.label} added`,
+      description: `${bundle.matchedTests.length} test${bundle.matchedTests.length > 1 ? "s" : ""} added to this request.`,
+      variant: "success"
     });
   };
 
@@ -626,6 +852,9 @@ export function OrdersManagement() {
         setEditingOrderId(null);
         setFormState(initialOrderFormState);
         setPatientSearch("");
+        setTestSearch("");
+        setPatientPickerOpen(false);
+        setTestPickerOpen(false);
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: ["recent-orders"] }),
           queryClient.invalidateQueries({ queryKey: ["patient-orders"] }),
@@ -668,6 +897,9 @@ export function OrdersManagement() {
       });
       setFormState(initialOrderFormState);
       setPatientSearch("");
+      setTestSearch("");
+      setPatientPickerOpen(false);
+      setTestPickerOpen(false);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["recent-orders"] }),
         queryClient.invalidateQueries({ queryKey: ["patient-orders"] }),
@@ -718,34 +950,64 @@ export function OrdersManagement() {
         </Card>
       </section>
 
-      <section className="grid gap-6 xl:grid-cols-[1.35fr_0.65fr]">
-        <Card className="border-blue-100 print-hidden">
-          <CardHeader>
-            <div className="flex items-center justify-between gap-3">
-              <div>
+      <section
+        className={cn(
+          "grid gap-6",
+          showRecentPanel
+            ? "xl:grid-cols-[minmax(0,1fr)_360px] 2xl:grid-cols-[minmax(0,1fr)_380px]"
+            : "xl:grid-cols-1"
+        )}
+      >
+        <Card className="overflow-hidden border-blue-100 print-hidden">
+          <CardHeader className="border-b border-blue-100 bg-[linear-gradient(135deg,_rgba(239,246,255,0.95),_rgba(255,255,255,1))]">
+            <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+              <div className="max-w-3xl">
                 <CardTitle className="flex items-center gap-2">
                   <ClipboardPlus className="h-5 w-5 text-blue-700" />
                   {editingOrder ? `Edit test order ${editingOrder.order_number}` : "Create lab test"}
                 </CardTitle>
-                <CardDescription>
+                <CardDescription className="mt-2">
                   {editingOrder
-                    ? "Add extra tests to this existing order number and update the bill automatically."
-                    : "Select a patient, add multiple tests, and generate sample labels in one step."}
+                    ? "Add extra tests to the same order number, keep the sample trail intact, and refresh the bill automatically."
+                    : "Move from patient search to bundled tests, labels, and billing without the screen feeling crowded."}
                 </CardDescription>
+                <div className="mt-4 flex flex-wrap gap-2 text-xs">
+                  <Badge variant="outline">/ patient</Badge>
+                  <Badge variant="outline">Alt+T test</Badge>
+                  <Badge variant="outline">Ctrl+Enter create</Badge>
+                  <Badge variant="outline">Alt+R recent</Badge>
+                </div>
               </div>
-              <Badge variant="outline">
-                {canCreateOrders ? "Reception/Admin" : "View only"}
-              </Badge>
+              <div className="flex items-center gap-2">
+                <Badge variant="outline">
+                  {canCreateOrders ? "Reception/Admin" : "View only"}
+                </Badge>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="hidden xl:inline-flex"
+                  onClick={() => setShowRecentPanel((current) => !current)}
+                  aria-expanded={showRecentPanel}
+                >
+                  {showRecentPanel ? (
+                    <PanelRightClose className="h-4 w-4" />
+                  ) : (
+                    <PanelRightOpen className="h-4 w-4" />
+                  )}
+                  {showRecentPanel ? "Hide recent tests" : "Show recent tests"}
+                </Button>
+              </div>
             </div>
           </CardHeader>
-          <CardContent>
+          <CardContent className="p-6">
             {!canCreateOrders ? (
               <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-5 text-sm text-slate-600">
                 Your role can view tests, but only reception and admin users can create new
                 test requests.
               </div>
             ) : (
-              <form className="space-y-5" onSubmit={handleSubmit}>
+              <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_300px]">
+                <form className="space-y-5" onSubmit={handleSubmit}>
                 {editingOrder ? (
                   <div className="rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
                     You are editing order <strong>{editingOrder.order_number}</strong>. New
@@ -765,47 +1027,157 @@ export function OrdersManagement() {
                   </div>
                 ) : null}
 
-                <div className="space-y-2">
-                  <Label htmlFor="patient-search">Find patient</Label>
-                  <div className="relative">
-                    <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-slate-400" />
-                    <Input
-                      id="patient-search"
-                      className="pl-9"
-                      value={patientSearch}
-                      onChange={(event) => setPatientSearch(event.target.value)}
-                      placeholder="Search patient name, phone, or lab ID"
-                    />
+                <div className="space-y-5 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+                  <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_220px]">
+                    <div className="space-y-2">
+                      <Label htmlFor="patient-search-input">Patient search</Label>
+                      <div className="relative">
+                        <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-slate-400" />
+                        <Input
+                          ref={patientInputRef}
+                          id="patient-search-input"
+                          className="pl-9"
+                          value={patientSearch}
+                          onFocus={() => setPatientPickerOpen(true)}
+                          onBlur={() => {
+                            window.setTimeout(() => setPatientPickerOpen(false), 120);
+                          }}
+                          onChange={(event) => {
+                            setPatientSearch(event.target.value);
+                            setPatientPickerOpen(true);
+                            if (formState.patient_id) {
+                              setFormState((current) => ({
+                                ...current,
+                                patient_id: ""
+                              }));
+                            }
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === "ArrowDown") {
+                              event.preventDefault();
+                              setPatientPickerOpen(true);
+                              setHighlightedPatientIndex((current) =>
+                                Math.min(
+                                  current + 1,
+                                  Math.max((patientsQuery.data ?? []).length - 1, 0)
+                                )
+                              );
+                            }
+
+                            if (event.key === "ArrowUp") {
+                              event.preventDefault();
+                              setHighlightedPatientIndex((current) => Math.max(current - 1, 0));
+                            }
+
+                            if (event.key === "Enter" && highlightedPatient) {
+                              event.preventDefault();
+                              selectPatient(highlightedPatient);
+                            }
+                          }}
+                          placeholder="Search patient name, phone, or lab ID"
+                        />
+
+                        {patientPickerOpen ? (
+                          <div className="absolute inset-x-0 top-full z-20 mt-2 max-h-72 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-xl">
+                            {patientsQuery.isLoading ? (
+                              <div className="flex items-center gap-2 px-3 py-6 text-sm text-slate-600">
+                                <Loader2 className="h-4 w-4 animate-spin text-blue-700" />
+                                Searching patients...
+                              </div>
+                            ) : (patientsQuery.data ?? []).length === 0 ? (
+                              <div className="px-3 py-6 text-sm text-slate-500">
+                                No patient matches this search yet.
+                              </div>
+                            ) : (
+                              (patientsQuery.data ?? []).map((patient, index) => (
+                                <button
+                                  key={patient.id}
+                                  type="button"
+                                  className={cn(
+                                    "flex w-full items-start justify-between rounded-xl px-3 py-3 text-left transition",
+                                    index === highlightedPatientIndex
+                                      ? "bg-blue-50 text-blue-900"
+                                      : "hover:bg-slate-50"
+                                  )}
+                                  onMouseDown={(event) => event.preventDefault()}
+                                  onClick={() => selectPatient(patient)}
+                                >
+                                  <div>
+                                    <p className="font-medium">{patient.name}</p>
+                                    <p className="text-xs text-slate-500">
+                                      {patient.lab_id}
+                                      {patient.phone ? ` / ${patient.phone}` : ""}
+                                    </p>
+                                  </div>
+                                  <ArrowRight className="mt-0.5 h-4 w-4 text-slate-400" />
+                                </button>
+                              ))
+                            )}
+                          </div>
+                        ) : null}
+                      </div>
+                      {errors.patient_id ? (
+                        <p className="text-xs text-red-700">{errors.patient_id}</p>
+                      ) : null}
+                      {selectedPatient ? (
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                          <Badge variant="secondary">Selected</Badge>
+                          <span>{formatPatientOption(selectedPatient)}</span>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="priority">Priority</Label>
+                      <select
+                        id="priority"
+                        className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm"
+                        value={formState.priority}
+                        onChange={(event) =>
+                          setFormState((current) => ({
+                            ...current,
+                            priority: event.target.value as OrderFormValues["priority"]
+                          }))
+                        }
+                      >
+                        {priorityOptions.map((priority) => (
+                          <option key={priority} value={priority}>
+                            {priority}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-xs text-slate-500">
+                        Choose routine, urgent, or stat before final submission.
+                      </p>
+                    </div>
                   </div>
                 </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="patient_id">Patient</Label>
-                  <select
-                    id="patient_id"
-                    className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm"
-                    value={formState.patient_id}
-                    onChange={(event) =>
-                      setFormState((current) => ({
-                        ...current,
-                        patient_id: event.target.value
-                      }))
-                    }
-                  >
-                    <option value="">Select patient</option>
-                    {(patientsQuery.data ?? []).map((patient) => (
-                      <option key={patient.id} value={patient.id}>
-                        {patient.name} - {patient.lab_id}
-                      </option>
-                    ))}
-                  </select>
-                  {errors.patient_id ? (
-                    <p className="text-xs text-red-700">{errors.patient_id}</p>
-                  ) : null}
-                </div>
-
-                <div className="space-y-3">
-                  <Label>Tests</Label>
+                <div className="space-y-5 rounded-3xl border border-slate-200 bg-slate-50/70 p-5 shadow-sm">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    <div>
+                      <Label className="text-base">Test selection</Label>
+                      <p className="mt-1 text-sm text-slate-500">
+                        Search within a category, tap quick bundles, and keep the bench list tidy.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {quickBundles.map((bundle) => (
+                        <Button
+                          key={bundle.id}
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-8 rounded-full px-3 text-xs"
+                          disabled={bundle.missingCount > 0}
+                          onClick={() => handleApplyQuickBundle(bundle)}
+                        >
+                          <Sparkles className="h-3.5 w-3.5" />
+                          {bundle.label}
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
                   <div className="space-y-4 rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
                     <div className="grid gap-3 lg:grid-cols-[220px_minmax(0,1fr)_auto]">
                       <div className="space-y-2">
@@ -814,9 +1186,11 @@ export function OrdersManagement() {
                           id="test-category-select"
                           className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm"
                           value={selectedCategory}
-                          onChange={(event) =>
-                            setSelectedCategory(event.target.value as TestCategoryOption | "")
-                          }
+                          onChange={(event) => {
+                            setSelectedCategory(event.target.value as TestCategoryOption | "");
+                            setTestSearch("");
+                            setTestPickerOpen(true);
+                          }}
                         >
                           {availableCategories.length === 0 ? (
                             <option value="">No categories available</option>
@@ -830,24 +1204,89 @@ export function OrdersManagement() {
                       </div>
 
                       <div className="space-y-2">
-                        <Label htmlFor="test-name-select">Available tests</Label>
-                        <select
-                          id="test-name-select"
-                          className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm"
-                          value={selectedCatalogueTestId}
-                          onChange={(event) => setSelectedCatalogueTestId(event.target.value)}
-                        >
-                          {testsInSelectedCategory.length === 0 ? (
-                            <option value="">No tests in this category</option>
+                        <Label htmlFor="test-search-input">Search test</Label>
+                        <div className="relative">
+                          <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-slate-400" />
+                          <Input
+                            ref={testInputRef}
+                            id="test-search-input"
+                            className="pl-9"
+                            value={testSearch}
+                            onFocus={() => setTestPickerOpen(true)}
+                            onBlur={() => {
+                              window.setTimeout(() => setTestPickerOpen(false), 120);
+                            }}
+                            onChange={(event) => {
+                              setTestSearch(event.target.value);
+                              setTestPickerOpen(true);
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === "ArrowDown") {
+                                event.preventDefault();
+                                setTestPickerOpen(true);
+                                setHighlightedTestIndex((current) =>
+                                  Math.min(
+                                    current + 1,
+                                    Math.max(filteredTestsInSelectedCategory.length - 1, 0)
+                                  )
+                                );
+                              }
+
+                              if (event.key === "ArrowUp") {
+                                event.preventDefault();
+                                setHighlightedTestIndex((current) => Math.max(current - 1, 0));
+                              }
+
+                              if (event.key === "Enter" && highlightedCatalogueTest) {
+                                event.preventDefault();
+                                selectCatalogueTest(highlightedCatalogueTest);
+                                handleAddSelectedTest();
+                              }
+                            }}
+                            placeholder="Search test code or name"
+                          />
+
+                          {testPickerOpen ? (
+                            <div className="absolute inset-x-0 top-full z-20 mt-2 max-h-80 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-xl">
+                              {testsQuery.isLoading ? (
+                                <div className="flex items-center gap-2 px-3 py-6 text-sm text-slate-600">
+                                  <Loader2 className="h-4 w-4 animate-spin text-blue-700" />
+                                  Loading test catalogue...
+                                </div>
+                              ) : filteredTestsInSelectedCategory.length === 0 ? (
+                                <div className="px-3 py-6 text-sm text-slate-500">
+                                  No test matches this category and search.
+                                </div>
+                              ) : (
+                                filteredTestsInSelectedCategory.map((test, index) => (
+                                  <button
+                                    key={test.id}
+                                    type="button"
+                                    className={cn(
+                                      "flex w-full items-start justify-between rounded-xl px-3 py-3 text-left transition",
+                                      index === highlightedTestIndex
+                                        ? "bg-blue-50 text-blue-900"
+                                        : "hover:bg-slate-50"
+                                    )}
+                                    onMouseDown={(event) => event.preventDefault()}
+                                    onClick={() => selectCatalogueTest(test)}
+                                  >
+                                    <div className="min-w-0">
+                                      <p className="font-medium">
+                                        {test.test_code} - {test.name}
+                                      </p>
+                                      <p className="text-xs text-slate-500">
+                                        {getTestCategoryLabel(test.category)} / N
+                                        {Number(test.price).toLocaleString("en-NG")}
+                                      </p>
+                                    </div>
+                                    <ArrowRight className="mt-0.5 h-4 w-4 text-slate-400" />
+                                  </button>
+                                ))
+                              )}
+                            </div>
                           ) : null}
-                          {testsInSelectedCategory.map((test) => (
-                            <option key={test.id} value={test.id}>
-                              {test.test_code} - {test.name} -{" "}
-                              {getTestCategoryLabel(test.category)} - N
-                              {Number(test.price).toLocaleString("en-NG")}
-                            </option>
-                          ))}
-                        </select>
+                        </div>
                       </div>
 
                       <div className="flex items-end">
@@ -964,7 +1403,7 @@ export function OrdersManagement() {
                   </p>
                 ) : null}
 
-                <Button type="submit" className="w-full" disabled={creating}>
+                <Button ref={submitButtonRef} type="submit" className="w-full" disabled={creating}>
                   {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
                   {creating
                     ? editingOrder
@@ -974,62 +1413,174 @@ export function OrdersManagement() {
                       ? "Add selected tests to existing order"
                       : "Create test request and generate labels"}
                 </Button>
-              </form>
+                </form>
+
+                <div className="xl:sticky xl:top-24 xl:self-start">
+                  <Card className="border-slate-200 bg-[linear-gradient(180deg,_rgba(248,250,252,1),_rgba(255,255,255,1))] shadow-sm">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-base">Order summary</CardTitle>
+                      <CardDescription>
+                        Keep the patient, tests, and billing impact visible while you register.
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                        <p className="text-xs font-medium uppercase tracking-[0.2em] text-slate-500">
+                          Patient
+                        </p>
+                        <p className="mt-2 font-semibold text-slate-950">
+                          {selectedPatient?.name || "No patient selected"}
+                        </p>
+                        <p className="mt-1 text-sm text-slate-500">
+                          {selectedPatient?.lab_id || "Search and select a patient first"}
+                        </p>
+                      </div>
+
+                      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+                        <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                          <p className="text-xs font-medium uppercase tracking-[0.2em] text-slate-500">
+                            Priority
+                          </p>
+                          <p className="mt-2 text-lg font-semibold text-slate-950">
+                            {formState.priority}
+                          </p>
+                        </div>
+                        <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                          <p className="text-xs font-medium uppercase tracking-[0.2em] text-slate-500">
+                            Running total
+                          </p>
+                          <p className="mt-2 text-lg font-semibold text-slate-950">
+                            N{selectedTestsTotal.toLocaleString("en-NG")}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="text-xs font-medium uppercase tracking-[0.2em] text-slate-500">
+                            Selected tests
+                          </p>
+                          <Badge variant="secondary">{selectedTests.length}</Badge>
+                        </div>
+                        {selectedTests.length === 0 ? (
+                          <p className="mt-3 text-sm text-slate-500">
+                            No tests selected yet.
+                          </p>
+                        ) : (
+                          <div className="mt-3 space-y-2">
+                            {selectedTests.map((test) => (
+                              <div
+                                key={test.id}
+                                className="flex items-start justify-between gap-3 rounded-xl border border-slate-100 bg-slate-50 px-3 py-3"
+                              >
+                                <div className="min-w-0">
+                                  <p className="text-sm font-medium text-slate-950">
+                                    {test.test_code} - {test.name}
+                                  </p>
+                                  <p className="text-xs text-slate-500">
+                                    {getTestCategoryLabel(test.category)}
+                                  </p>
+                                </div>
+                                <p className="text-sm font-medium text-slate-700">
+                                  N{Number(test.price).toLocaleString("en-NG")}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="rounded-2xl border border-dashed border-blue-200 bg-blue-50 p-4">
+                        <div className="flex items-start gap-3">
+                          <Keyboard className="mt-0.5 h-4 w-4 text-blue-700" />
+                          <div className="space-y-2 text-sm text-blue-900">
+                            <p className="font-medium">Reception shortcuts</p>
+                            <p>/ jumps to patient search.</p>
+                            <p>Alt+T jumps to test search.</p>
+                            <p>Ctrl+Enter submits the request.</p>
+                          </div>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+              </div>
             )}
           </CardContent>
         </Card>
 
-        <Card className="border-blue-100 print-hidden">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <FlaskConical className="h-5 w-5 text-blue-700" />
-              Recent tests
-            </CardTitle>
-            <CardDescription>
-              Latest test requests and specimen codes created for this facility.
-            </CardDescription>
+        <Card
+          className={cn(
+            "border-blue-100 print-hidden xl:self-start",
+            !showRecentPanel && "xl:hidden"
+          )}
+        >
+          <CardHeader className="pb-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <CardTitle className="flex items-center gap-2">
+                  <FlaskConical className="h-5 w-5 text-blue-700" />
+                  Recent tests
+                </CardTitle>
+                <CardDescription>
+                  Last five requests for quick follow-up.
+                </CardDescription>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="hidden xl:inline-flex"
+                onClick={() => setShowRecentPanel(false)}
+              >
+                <PanelRightClose className="h-4 w-4" />
+                Hide
+              </Button>
+            </div>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_180px_160px]">
+          <CardContent className="space-y-3 p-4 pt-0">
+            <div className="grid gap-2">
               <div className="relative">
-                <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-slate-400" />
+                <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
                 <Input
-                  className="pl-9"
+                  className="h-9 pl-9 text-sm"
                   value={recentSearch}
                   onChange={(event) => setRecentSearch(event.target.value)}
-                  placeholder="Search test request, patient, lab ID, or sample"
+                  placeholder="Search request, patient, or sample"
                 />
               </div>
-              <select
-                className="h-10 rounded-lg border border-border bg-background px-3 text-sm"
-                value={recentStatusFilter}
-                onChange={(event) =>
-                  setRecentStatusFilter(event.target.value as RecentOrderFilter)
-                }
-              >
-                <option value="all">All statuses</option>
-                {sampleStatuses.map((status) => (
-                  <option key={status} value={status}>
-                    {formatSampleStatus(status)}
-                  </option>
-                ))}
-              </select>
-              <select
-                className="h-10 rounded-lg border border-border bg-background px-3 text-sm"
-                value={recentPriorityFilter}
-                onChange={(event) =>
-                  setRecentPriorityFilter(
-                    event.target.value as (typeof priorityOptions)[number] | "all"
-                  )
-                }
-              >
-                <option value="all">All priorities</option>
-                {priorityOptions.map((priority) => (
-                  <option key={priority} value={priority}>
-                    {priority}
-                  </option>
-                ))}
-              </select>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <select
+                  className="h-9 rounded-lg border border-border bg-background px-3 text-xs"
+                  value={recentStatusFilter}
+                  onChange={(event) =>
+                    setRecentStatusFilter(event.target.value as RecentOrderFilter)
+                  }
+                >
+                  <option value="all">All statuses</option>
+                  {sampleStatuses.map((status) => (
+                    <option key={status} value={status}>
+                      {formatSampleStatus(status)}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  className="h-9 rounded-lg border border-border bg-background px-3 text-xs"
+                  value={recentPriorityFilter}
+                  onChange={(event) =>
+                    setRecentPriorityFilter(
+                      event.target.value as (typeof priorityOptions)[number] | "all"
+                    )
+                  }
+                >
+                  <option value="all">All priorities</option>
+                  {priorityOptions.map((priority) => (
+                    <option key={priority} value={priority}>
+                      {priority}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             {recentOrdersQuery.isLoading ? (
@@ -1053,15 +1604,16 @@ export function OrdersManagement() {
               </div>
             ) : null}
 
-            {filteredRecentOrders.map((order) => (
-              <div
-                key={order.id}
-                className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
-              >
-                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                  <div className="space-y-2">
+            <div className="space-y-3 xl:max-h-[720px] xl:overflow-y-auto xl:pr-1">
+              {filteredRecentOrders.map((order) => (
+                <div
+                  key={order.id}
+                  className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm"
+                >
+                  <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                    <div className="space-y-2">
                     <div className="flex flex-wrap items-center gap-2">
-                      <p className="font-semibold text-slate-950">{order.order_number}</p>
+                      <p className="text-sm font-semibold text-slate-950">{order.order_number}</p>
                       <Badge variant="secondary">
                         {formatSampleStatus(order.status)}
                       </Badge>
@@ -1071,61 +1623,72 @@ export function OrdersManagement() {
                       {order.patients?.name || "Unknown patient"} •{" "}
                       {order.patients?.lab_id || "No lab ID"}
                     </p>
-                    <p className="text-sm text-slate-500">
+                    <p className="text-xs text-slate-500">
                       {formatDateTime(order.created_at)}
                     </p>
                   </div>
-                  <div className="flex flex-wrap gap-2">
+                  <div className="flex flex-wrap gap-1.5">
                     <Button
                       type="button"
                       size="sm"
                       variant="outline"
+                      className="h-8 px-2.5 text-xs"
                       onClick={() => setEditingOrderId(order.id)}
                     >
                       <PencilLine className="h-4 w-4" />
                       Edit tests
                     </Button>
-                    <Button asChild size="sm" variant="outline">
+                    <Button asChild size="sm" variant="outline" className="h-8 px-2.5 text-xs">
                       <Link href={`/billing?patientId=${order.patient_id}&orderId=${order.id}`}>
                         <FileText className="h-4 w-4" />
                         Bill
                       </Link>
                     </Button>
-                    <Button asChild size="sm" variant="outline">
+                    <Button asChild size="sm" variant="outline" className="h-8 px-2.5 text-xs">
                       <Link href={`/results?orderId=${order.id}`}>Results</Link>
                     </Button>
                   </div>
-                </div>
+                  </div>
 
-                <Separator className="my-4" />
+                  <Separator className="my-3" />
 
-                <div className="grid gap-3 md:grid-cols-2">
-                  {(order.order_tests ?? []).map((sample) => (
-                    <div
-                      key={sample.id}
-                      className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-3"
-                    >
-                      <p className="font-medium text-slate-900">
-                        {sample.tests?.name || "Unknown test"}
-                      </p>
-                      <p className="mt-1 text-sm text-slate-600">{sample.sample_code}</p>
-                      <div className="mt-2 flex flex-wrap items-center gap-2">
-                        <Badge variant="outline">{formatSampleStatus(sample.status)}</Badge>
-                        <Button asChild size="sm" variant="ghost">
-                          <Link href={`/results?sampleId=${sample.id}`}>Edit result</Link>
-                        </Button>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    {(order.order_tests ?? []).map((sample) => (
+                      <div
+                        key={sample.id}
+                        className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2.5"
+                      >
+                        <p className="text-sm font-medium text-slate-900">
+                          {sample.tests?.name || "Unknown test"}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-600">{sample.sample_code}</p>
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                          <Badge variant="outline">{formatSampleStatus(sample.status)}</Badge>
+                          <Button
+                            asChild
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 px-2 text-xs"
+                          >
+                            <Link href={`/results?sampleId=${sample.id}`}>Edit result</Link>
+                          </Button>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </CardContent>
         </Card>
       </section>
 
       {createdOrder ? (
-        <div className="space-y-4">
+        <div
+          ref={createdOrderFocusRef}
+          tabIndex={-1}
+          className="space-y-4 outline-none"
+        >
           <Card className="border-blue-100 print-hidden">
             <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
               <div>
@@ -1133,10 +1696,10 @@ export function OrdersManagement() {
                   Bill ready for {createdOrder.orderNumber}
                 </p>
                 <p className="text-sm text-slate-600">
-                  The invoice is linked to this test order and can be printed immediately.
+                  The invoice is linked to this test order and this section now becomes the next action point.
                 </p>
               </div>
-              <Button asChild>
+              <Button asChild autoFocus>
                 <Link
                   href={`/billing?patientId=${createdOrder.patientId}&orderId=${createdOrder.orderId}`}
                 >

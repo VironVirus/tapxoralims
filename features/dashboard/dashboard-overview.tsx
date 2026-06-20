@@ -1,14 +1,18 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import type { Route } from "next";
+import Link from "next/link";
 import { useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { LucideIcon } from "lucide-react";
 import {
   Activity,
   AlertTriangle,
+  BellRing,
   CheckCircle2,
   Clock3,
+  CreditCard,
   Download,
   FileSpreadsheet,
   FlaskConical,
@@ -54,11 +58,19 @@ import {
 import { getSupabaseBrowserClient } from "@/lib/supabase";
 
 type DashboardData = {
+  facilities: DashboardFacilityRow[];
   inventoryItems: InventoryItemRow[];
   invoices: DashboardInvoiceRow[];
   patients: DashboardPatientRow[];
   payments: DashboardPaymentRow[];
   worklist: DashboardWorklistRow[];
+};
+
+type DashboardFacilityRow = {
+  code: string;
+  id: string;
+  name: string;
+  parent_facility_id: string | null;
 };
 
 type SummaryCardProps = {
@@ -106,12 +118,18 @@ async function fetchDashboardData(): Promise<DashboardData> {
     throw new Error("Supabase is not configured.");
   }
 
-  const [worklistResponse, invoicesResponse, paymentsResponse, inventoryResponse, patientsResponse] =
-    await Promise.all([
+  const [
+    worklistResponse,
+    invoicesResponse,
+    paymentsResponse,
+    inventoryResponse,
+    patientsResponse,
+    facilitiesResponse
+  ] = await Promise.all([
       supabase
         .from("order_tests")
         .select(
-          "id, order_id, test_id, sample_code, specimen_label, status, created_at, updated_at, collected_at, collected_by, in_progress_at, results_entered_at, verified_at, reported_at, tests(id, name), orders(id, patient_id, order_number, ordered_at, priority, patients(id, name, lab_id))"
+          "id, order_id, test_id, sample_code, specimen_label, status, created_at, updated_at, collected_at, collected_by, in_progress_at, results_entered_at, verified_at, reported_at, tests(id, name), orders(id, facility_id, patient_id, order_number, ordered_at, priority, facilities(id, name, code), patients(id, name, lab_id))"
         )
         .gte("created_at", startIso)
         .order("created_at", { ascending: false })
@@ -136,10 +154,14 @@ async function fetchDashboardData(): Promise<DashboardData> {
         .limit(80),
       supabase
         .from("patients")
-        .select("id, created_at")
+        .select("id, facility_id, created_at")
         .gte("created_at", startIso)
         .order("created_at", { ascending: false })
-        .limit(240)
+        .limit(240),
+      supabase
+        .from("facilities")
+        .select("id, name, code, parent_facility_id")
+        .order("name", { ascending: true })
     ]);
 
   if (worklistResponse.error) {
@@ -162,7 +184,12 @@ async function fetchDashboardData(): Promise<DashboardData> {
     throw new Error(patientsResponse.error.message);
   }
 
+  if (facilitiesResponse.error) {
+    throw new Error(facilitiesResponse.error.message);
+  }
+
   return {
+    facilities: (facilitiesResponse.data ?? []) as DashboardFacilityRow[],
     inventoryItems: (inventoryResponse.data ?? []) as InventoryItemRow[],
     invoices: (invoicesResponse.data ?? []) as DashboardInvoiceRow[],
     patients: (patientsResponse.data ?? []) as DashboardPatientRow[],
@@ -254,6 +281,237 @@ function DashboardAnalyticsLoading() {
         </section>
       ))}
     </div>
+  );
+}
+
+function ActivityNotificationsPanel({
+  alertItems,
+  invoices,
+  worklist
+}: {
+  alertItems: Array<{
+    alert: NonNullable<ReturnType<typeof getAlertSummary>>;
+    item: InventoryItemRow;
+  }>;
+  invoices: DashboardInvoiceRow[];
+  worklist: DashboardWorklistRow[];
+}) {
+  const pendingVerification = worklist.filter(
+    (item) => item.status === "Results_Entered"
+  ).length;
+  const unpaidInvoices = invoices.filter(
+    (invoice) => invoice.payment_status === "Unpaid" || invoice.payment_status === "Partial"
+  );
+  const unpaidAmount = unpaidInvoices.reduce(
+    (sum, invoice) =>
+      sum + Math.max(Number(invoice.total_amount) - Number(invoice.amount_paid), 0),
+    0
+  );
+  const criticalStock = alertItems.filter(
+    ({ alert }) => alert.severity === "high"
+  ).length;
+
+  const notifications = [
+    {
+      href: "/results",
+      icon: CheckCircle2,
+      severity: pendingVerification > 0 ? "warning" : "info",
+      title: "Pending HOD verification",
+      value: `${pendingVerification} result(s)`,
+      description:
+        pendingVerification > 0
+          ? "Results entered by the bench and waiting for HOD of Lab / Chief Scientist approval."
+          : "No result is waiting for verification right now."
+    },
+    {
+      href: "/inventory",
+      icon: AlertTriangle,
+      severity: criticalStock > 0 ? "critical" : alertItems.length > 0 ? "warning" : "info",
+      title: "Inventory alerts",
+      value: `${alertItems.length} item(s)`,
+      description:
+        alertItems.length > 0
+          ? `${criticalStock} critical item(s), including low stock, expired, or near-expiry reagents.`
+          : "No low-stock or near-expiry item is currently flagged."
+    },
+    {
+      href: "/billing",
+      icon: CreditCard,
+      severity: unpaidInvoices.length > 0 ? "warning" : "info",
+      title: "Unpaid invoices",
+      value: formatCurrency(unpaidAmount),
+      description:
+        unpaidInvoices.length > 0
+          ? `${unpaidInvoices.length} invoice(s) still need payment follow-up.`
+          : "All visible invoices in the dashboard window are settled."
+    }
+  ];
+
+  return (
+    <Card className="border-blue-100 shadow-sm">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <BellRing className="h-5 w-5 text-blue-700" />
+          Activity notifications
+        </CardTitle>
+        <CardDescription>
+          Live action items for verification, stock pressure, expiry risk, and receivables.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-3 lg:grid-cols-3">
+        {notifications.map((notification) => {
+          const Icon = notification.icon;
+          const tone =
+            notification.severity === "critical"
+              ? "border-red-200 bg-red-50 text-red-800"
+              : notification.severity === "warning"
+                ? "border-amber-200 bg-amber-50 text-amber-800"
+                : "border-blue-100 bg-blue-50 text-blue-800";
+
+          return (
+            <Link
+              key={notification.title}
+              href={notification.href as Route}
+              className={`rounded-2xl border p-4 transition hover:-translate-y-0.5 hover:shadow-sm ${tone}`}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold">{notification.title}</p>
+                  <p className="mt-2 text-2xl font-semibold">{notification.value}</p>
+                </div>
+                <Icon className="h-5 w-5" />
+              </div>
+              <p className="mt-3 text-xs leading-5 opacity-90">{notification.description}</p>
+            </Link>
+          );
+        })}
+      </CardContent>
+    </Card>
+  );
+}
+
+function BranchDashboardPanel({ data }: { data: DashboardData | undefined }) {
+  const rows = useMemo(() => {
+    if (!data) {
+      return [];
+    }
+
+    const branchMap = new Map<
+      string,
+      {
+        activeTests: number;
+        code: string;
+        id: string;
+        name: string;
+        patients: number;
+        revenue: number;
+        unpaid: number;
+        verified: number;
+      }
+    >();
+
+    const ensureBranch = (
+      facilityId: string | null | undefined,
+      fallbackName = "Unassigned facility"
+    ) => {
+      const facility = data.facilities.find((entry) => entry.id === facilityId);
+      const key = facility?.id ?? facilityId ?? "unknown";
+      if (!branchMap.has(key)) {
+        branchMap.set(key, {
+          activeTests: 0,
+          code: facility?.code ?? "N/A",
+          id: key,
+          name: facility?.name ?? fallbackName,
+          patients: 0,
+          revenue: 0,
+          unpaid: 0,
+          verified: 0
+        });
+      }
+
+      return branchMap.get(key)!;
+    };
+
+    data.facilities.forEach((facility) => ensureBranch(facility.id, facility.name));
+
+    data.worklist.forEach((item) => {
+      const branch = ensureBranch(item.orders?.facility_id, item.orders?.facilities?.name);
+      if (item.status !== "Reported") {
+        branch.activeTests += 1;
+      }
+      if (item.status === "Verified" || item.status === "Reported") {
+        branch.verified += 1;
+      }
+    });
+
+    data.patients.forEach((patient) => {
+      ensureBranch(patient.facility_id).patients += 1;
+    });
+
+    data.payments.forEach((payment) => {
+      ensureBranch(payment.facility_id).revenue += Number(payment.amount);
+    });
+
+    data.invoices.forEach((invoice) => {
+      if (invoice.payment_status !== "Paid") {
+        ensureBranch(invoice.facility_id).unpaid += Math.max(
+          Number(invoice.total_amount) - Number(invoice.amount_paid),
+          0
+        );
+      }
+    });
+
+    return Array.from(branchMap.values()).sort((left, right) =>
+      right.revenue === left.revenue
+        ? left.name.localeCompare(right.name)
+        : right.revenue - left.revenue
+    );
+  }, [data]);
+
+  if (rows.length <= 1) {
+    return null;
+  }
+
+  return (
+    <Card className="border-blue-100 shadow-sm">
+      <CardHeader>
+        <CardTitle>Branch / multi-facility dashboard</CardTitle>
+        <CardDescription>
+          Compares visible branch activity. Admins assigned to a parent facility can view child branches.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-3 xl:grid-cols-3">
+        {rows.map((row) => (
+          <div key={row.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="truncate font-semibold text-slate-950">{row.name}</p>
+                <p className="text-xs text-slate-500">{row.code}</p>
+              </div>
+              <Badge variant="outline">{row.activeTests} active</Badge>
+            </div>
+            <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+              <div>
+                <p className="text-slate-500">Patients</p>
+                <p className="font-semibold text-slate-950">{row.patients}</p>
+              </div>
+              <div>
+                <p className="text-slate-500">Verified</p>
+                <p className="font-semibold text-slate-950">{row.verified}</p>
+              </div>
+              <div>
+                <p className="text-slate-500">Revenue</p>
+                <p className="font-semibold text-emerald-700">{formatCurrency(row.revenue)}</p>
+              </div>
+              <div>
+                <p className="text-slate-500">Unpaid</p>
+                <p className="font-semibold text-amber-700">{formatCurrency(row.unpaid)}</p>
+              </div>
+            </div>
+          </div>
+        ))}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -502,6 +760,14 @@ export function DashboardOverview() {
           <SummaryCard key={card.label} {...card} />
         ))}
       </section>
+
+      <ActivityNotificationsPanel
+        alertItems={analytics.alertItems}
+        invoices={dashboardQuery.data?.invoices ?? []}
+        worklist={dashboardQuery.data?.worklist ?? []}
+      />
+
+      <BranchDashboardPanel data={dashboardQuery.data} />
 
       <section className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
         <ChartShell

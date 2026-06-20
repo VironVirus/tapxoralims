@@ -68,3 +68,11 @@ export function canAccessAccountsRole(role: AppRole | null | undefined) {
 export function canManageAccountsRole(role: AppRole | null | undefined) {
   return role === "Admin" || role === "Accountant";
 }
+
+export function canAccessQcRole(role: AppRole | null | undefined) {
+  return role === "Admin" || role === "LabScientist" || role === "Verifier";
+}
+
+export function canManageQcRole(role: AppRole | null | undefined) {
+  return role === "Admin" || role === "LabScientist";
+}
